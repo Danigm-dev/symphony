@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.Linear.Issue do
   @moduledoc """
-  Normalized Linear issue representation used by the orchestrator.
+  Compatibility wrapper for Linear issues while the runtime uses `SymphonyElixir.Issue`.
   """
+
+  alias SymphonyElixir.Issue
 
   defstruct [
     :id,
@@ -30,14 +32,24 @@ defmodule SymphonyElixir.Linear.Issue do
           branch_name: String.t() | nil,
           url: String.t() | nil,
           assignee_id: String.t() | nil,
-          labels: [String.t()],
+          blocked_by: [Issue.blocker_t()],
+          labels: [term()],
           assigned_to_worker: boolean(),
           created_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }
 
-  @spec label_names(t()) :: [String.t()]
-  def label_names(%__MODULE__{labels: labels}) do
-    labels
+  @spec from_issue(Issue.t() | map()) :: t()
+  def from_issue(issue) do
+    issue
+    |> Issue.from()
+    |> Map.from_struct()
+    |> then(&struct(__MODULE__, &1))
   end
+
+  @spec to_issue(t() | map()) :: Issue.t()
+  def to_issue(issue), do: Issue.from(issue)
+
+  @spec label_names(t()) :: [term()]
+  def label_names(issue), do: issue |> to_issue() |> Issue.label_names()
 end

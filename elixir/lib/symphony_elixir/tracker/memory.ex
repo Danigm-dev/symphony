@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Issue
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -52,7 +52,13 @@ defmodule SymphonyElixir.Tracker.Memory do
   end
 
   defp issue_entries do
-    Enum.filter(configured_issues(), &match?(%Issue{}, &1))
+    configured_issues()
+    |> Enum.map(fn
+      %Issue{} = issue -> issue
+      %{__struct__: SymphonyElixir.Linear.Issue} = issue -> Issue.from(issue)
+      _issue -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
   end
 
   defp send_event(message) do

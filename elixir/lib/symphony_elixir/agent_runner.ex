@@ -1,14 +1,15 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in an isolated workspace with Codex.
+  Executes a single issue in an isolated workspace with Codex.
   """
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Issue, PromptBuilder, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
+    issue = Issue.from(issue)
     Logger.info("Starting agent run for #{issue_context(issue)}")
 
     case Workspace.create_for_issue(issue) do
@@ -116,7 +117,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} ->
+      {:ok, [refreshed_issue | _]} ->
+        refreshed_issue = Issue.from(refreshed_issue)
+
         if active_issue_state?(refreshed_issue.state) do
           {:continue, refreshed_issue}
         else

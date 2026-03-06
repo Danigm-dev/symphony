@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Issue, as: NeutralIssue
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.Issue, as: LinearIssue
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -258,13 +260,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "linear issue helpers" do
-    issue = %Issue{
+    issue = %LinearIssue{
       id: "abc",
       labels: ["frontend", "infra"],
       assigned_to_worker: false
     }
 
-    assert Issue.label_names(issue) == ["frontend", "infra"]
+    assert LinearIssue.label_names(issue) == ["frontend", "infra"]
+    assert issue |> LinearIssue.to_issue() |> NeutralIssue.label_names() == ["frontend", "infra"]
     assert issue.labels == ["frontend", "infra"]
     refute issue.assigned_to_worker
   end
@@ -496,7 +499,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     fetcher = fn ["blocked-2"] -> {:ok, [refreshed_issue]} end
 
-    assert {:skip, %Issue{} = skipped_issue} =
+    assert {:skip, %NeutralIssue{} = skipped_issue} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"

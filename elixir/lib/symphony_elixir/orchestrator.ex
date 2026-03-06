@@ -7,8 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{AgentRunner, Config, Issue, StatusDashboard, Tracker, Workspace}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -176,7 +175,7 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      choose_issues(normalize_issues(issues), state)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -243,7 +242,7 @@ defmodule SymphonyElixir.Orchestrator do
       case Tracker.fetch_issue_states_by_ids(running_ids) do
         {:ok, issues} ->
           reconcile_running_issue_states(
-            issues,
+            normalize_issues(issues),
             state,
             active_state_set(),
             terminal_state_set()
@@ -260,31 +259,33 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+    reconcile_running_issue_states(normalize_issues(issues), state, active_state_set(), terminal_state_set())
   end
 
   def reconcile_issue_states_for_test(issues, state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+    reconcile_running_issue_states(normalize_issues(issues), state, active_state_set(), terminal_state_set())
   end
 
   @doc false
-  @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
-  def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
+  @spec should_dispatch_issue_for_test(Issue.t() | map(), term()) :: boolean()
+  def should_dispatch_issue_for_test(issue, %State{} = state) do
+    issue = Issue.from(issue)
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
   end
 
   @doc false
-  @spec revalidate_issue_for_dispatch_for_test(Issue.t(), ([String.t()] -> term())) ::
+  @spec revalidate_issue_for_dispatch_for_test(Issue.t() | map(), ([String.t()] -> term())) ::
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
-  def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
+  def revalidate_issue_for_dispatch_for_test(issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
+    issue = Issue.from(issue)
     revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
   end
 
   @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
-    sort_issues_for_dispatch(issues)
+    sort_issues_for_dispatch(normalize_issues(issues))
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -649,7 +650,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} ->
+      {:ok, [refreshed_issue | _]} ->
+        refreshed_issue = Issue.from(refreshed_issue)
+
         if retry_candidate_issue?(refreshed_issue, terminal_states) do
           {:ok, refreshed_issue}
         else
@@ -726,6 +729,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Tracker.fetch_candidate_issues() do
       {:ok, issues} ->
         issues
+        |> normalize_issues()
         |> find_issue_by_id(issue_id)
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
@@ -777,6 +781,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Tracker.fetch_issues_by_states(Config.linear_terminal_states()) do
       {:ok, issues} ->
         issues
+        |> normalize_issues()
         |> Enum.each(fn
           %Issue{identifier: identifier} when is_binary(identifier) ->
             cleanup_issue_workspace(identifier)
@@ -873,6 +878,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
+  end
+
+  defp normalize_issues(issues) when is_list(issues) do
+    Enum.map(issues, &Issue.from/1)
   end
 
   defp available_slots(%State{} = state) do

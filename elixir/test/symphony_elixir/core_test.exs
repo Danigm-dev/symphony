@@ -1,6 +1,12 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  defmodule FakeAzureDevOpsClient do
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -12,6 +18,12 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.poll_interval_ms() == 30_000
+    assert Config.tracker_endpoint() == "https://api.linear.app/graphql"
+    assert Config.tracker_api_token() == nil
+    assert Config.tracker_project_reference() == nil
+    assert Config.tracker_assignee() == nil
+    assert Config.tracker_active_states() == ["Todo", "In Progress"]
+    assert Config.tracker_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert Config.linear_active_states() == ["Todo", "In Progress"]
     assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert Config.linear_assignee() == nil
@@ -30,6 +42,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.agent_max_turns() == 5
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
+    assert Config.tracker_active_states() == ["Todo", "Review"]
     assert Config.linear_active_states() == ["Todo", "Review"]
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -69,6 +82,116 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: 123)
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  test "azure devops config validates required fields and exposes generic accessors" do
+    previous_token = System.get_env("AZURE_DEVOPS_TOKEN")
+    previous_assignee = System.get_env("AZURE_DEVOPS_ASSIGNEE")
+
+    on_exit(fn ->
+      restore_env("AZURE_DEVOPS_TOKEN", previous_token)
+      restore_env("AZURE_DEVOPS_ASSIGNEE", previous_assignee)
+    end)
+
+    System.put_env("AZURE_DEVOPS_TOKEN", "azure-token")
+    System.put_env("AZURE_DEVOPS_ASSIGNEE", "azure.user@example.com")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: nil,
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_project: nil,
+      tracker_assignee: nil,
+      tracker_active_states: ["New", "Active"],
+      tracker_terminal_states: ["Closed", "Done"],
+      tracker_wiql: "",
+      tracker_work_item_types: "User Story, Bug",
+      tracker_area_paths: ["Platform", "Agents"],
+      tracker_iteration_path: "FY26\\Sprint 1",
+      tracker_api_version: ""
+    )
+
+    assert Config.tracker_kind() == "azure_devops"
+    assert Config.tracker_endpoint() == nil
+    assert {:error, :missing_azure_devops_endpoint} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_project: nil
+    )
+
+    assert {:error, :missing_azure_devops_project} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: nil,
+      tracker_project_slug: "linear-project-ignored",
+      tracker_project: "Symphony",
+      tracker_assignee: nil,
+      tracker_active_states: ["New", "Active"],
+      tracker_terminal_states: ["Closed", "Done"],
+      tracker_wiql: "",
+      tracker_work_item_types: "User Story, Bug",
+      tracker_area_paths: "Platform, Agents",
+      tracker_iteration_path: "FY26\\Sprint 1",
+      tracker_api_version: ""
+    )
+
+    assert Config.tracker_endpoint() == "https://dev.azure.com/openai"
+    assert Config.tracker_api_token() == "azure-token"
+    assert Config.tracker_project_reference() == "Symphony"
+    assert Config.tracker_assignee() == "azure.user@example.com"
+    assert Config.tracker_active_states() == ["New", "Active"]
+    assert Config.tracker_terminal_states() == ["Closed", "Done"]
+    assert Config.azure_devops_endpoint() == "https://dev.azure.com/openai"
+    assert Config.azure_devops_api_token() == "azure-token"
+    assert Config.azure_devops_project() == "Symphony"
+    assert Config.azure_devops_assignee() == "azure.user@example.com"
+    assert Config.azure_devops_active_states() == ["New", "Active"]
+    assert Config.azure_devops_terminal_states() == ["Closed", "Done"]
+    assert Config.azure_devops_wiql() == nil
+    assert Config.azure_devops_work_item_types() == ["User Story", "Bug"]
+    assert Config.azure_devops_area_paths() == ["Platform", "Agents"]
+    assert Config.azure_devops_iteration_path() == "FY26\\Sprint 1"
+    assert Config.azure_devops_api_version() == "7.1"
+    assert :ok = Config.validate!()
+  end
+
+  test "orchestrator starts cleanly with azure devops config" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_active_states: ["New", "Active"],
+      tracker_terminal_states: ["Closed", "Done"]
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :AzureDevOpsOrchestrator)
+    Application.put_env(:symphony_elixir, :azure_devops_client_module, FakeAzureDevOpsClient)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :azure_devops_client_module)
+    end)
+
+    capture_log(fn ->
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      try do
+        Process.sleep(50)
+        assert Process.alive?(pid)
+      after
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end
+    end)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -112,7 +235,9 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.linear_api_token() == env_api_key
+    assert Config.tracker_api_token() == env_api_key
     assert Config.linear_project_slug() == "project"
+    assert Config.tracker_project_reference() == "project"
     assert :ok = Config.validate!()
   end
 
@@ -130,6 +255,7 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.linear_assignee() == env_assignee
+    assert Config.tracker_assignee() == env_assignee
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -668,7 +794,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear issue."
+    assert prompt =~ "You are working on a tracked issue."
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
     assert prompt =~ "Body:"

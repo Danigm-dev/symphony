@@ -9,8 +9,9 @@ defmodule SymphonyElixir.Config do
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   @default_linear_endpoint "https://api.linear.app/graphql"
+  @default_azure_devops_api_version "7.1"
   @default_prompt_template """
-  You are working on a Linear issue.
+  You are working on a tracked issue.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
@@ -50,9 +51,10 @@ defmodule SymphonyElixir.Config do
                                default: %{},
                                keys: [
                                  kind: [type: {:or, [:string, nil]}, default: nil],
-                                 endpoint: [type: :string, default: @default_linear_endpoint],
+                                 endpoint: [type: {:or, [:string, nil]}, default: nil],
                                  api_key: [type: {:or, [:string, nil]}, default: nil],
                                  project_slug: [type: {:or, [:string, nil]}, default: nil],
+                                 project: [type: {:or, [:string, nil]}, default: nil],
                                  assignee: [type: {:or, [:string, nil]}, default: nil],
                                  active_states: [
                                    type: {:list, :string},
@@ -61,7 +63,12 @@ defmodule SymphonyElixir.Config do
                                  terminal_states: [
                                    type: {:list, :string},
                                    default: @default_terminal_states
-                                 ]
+                                 ],
+                                 wiql: [type: {:or, [:string, nil]}, default: nil],
+                                 work_item_types: [type: {:list, :string}, default: []],
+                                 area_paths: [type: {:list, :string}, default: []],
+                                 iteration_path: [type: {:or, [:string, nil]}, default: nil],
+                                 api_version: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              polling: [
@@ -183,40 +190,126 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:tracker, :kind])
   end
 
+  @spec tracker_endpoint() :: String.t() | nil
+  def tracker_endpoint do
+    tracker_endpoint_for(tracker_kind())
+  end
+
+  @spec tracker_api_token() :: String.t() | nil
+  def tracker_api_token do
+    tracker_api_token_for(tracker_kind())
+  end
+
+  @spec tracker_project_reference() :: String.t() | nil
+  def tracker_project_reference do
+    tracker_project_reference_for(tracker_kind())
+  end
+
+  @spec tracker_assignee() :: String.t() | nil
+  def tracker_assignee do
+    tracker_assignee_for(tracker_kind())
+  end
+
+  @spec tracker_active_states() :: [String.t()]
+  def tracker_active_states do
+    get_in(validated_workflow_options(), [:tracker, :active_states])
+  end
+
+  @spec tracker_terminal_states() :: [String.t()]
+  def tracker_terminal_states do
+    get_in(validated_workflow_options(), [:tracker, :terminal_states])
+  end
+
   @spec linear_endpoint() :: String.t()
   def linear_endpoint do
-    get_in(validated_workflow_options(), [:tracker, :endpoint])
+    tracker_endpoint_for("linear") || @default_linear_endpoint
   end
 
   @spec linear_api_token() :: String.t() | nil
   def linear_api_token do
-    validated_workflow_options()
-    |> get_in([:tracker, :api_key])
-    |> resolve_env_value(System.get_env("LINEAR_API_KEY"))
-    |> normalize_secret_value()
+    tracker_api_token_for("linear")
   end
 
   @spec linear_project_slug() :: String.t() | nil
   def linear_project_slug do
-    get_in(validated_workflow_options(), [:tracker, :project_slug])
+    tracker_project_reference_for("linear")
   end
 
   @spec linear_assignee() :: String.t() | nil
   def linear_assignee do
-    validated_workflow_options()
-    |> get_in([:tracker, :assignee])
-    |> resolve_env_value(System.get_env("LINEAR_ASSIGNEE"))
-    |> normalize_secret_value()
+    tracker_assignee_for("linear")
   end
 
   @spec linear_active_states() :: [String.t()]
   def linear_active_states do
-    get_in(validated_workflow_options(), [:tracker, :active_states])
+    tracker_active_states()
   end
 
   @spec linear_terminal_states() :: [String.t()]
   def linear_terminal_states do
-    get_in(validated_workflow_options(), [:tracker, :terminal_states])
+    tracker_terminal_states()
+  end
+
+  @spec azure_devops_endpoint() :: String.t() | nil
+  def azure_devops_endpoint do
+    tracker_endpoint_for("azure_devops")
+  end
+
+  @spec azure_devops_api_token() :: String.t() | nil
+  def azure_devops_api_token do
+    tracker_api_token_for("azure_devops")
+  end
+
+  @spec azure_devops_project() :: String.t() | nil
+  def azure_devops_project do
+    tracker_project_reference_for("azure_devops")
+  end
+
+  @spec azure_devops_assignee() :: String.t() | nil
+  def azure_devops_assignee do
+    tracker_assignee_for("azure_devops")
+  end
+
+  @spec azure_devops_active_states() :: [String.t()]
+  def azure_devops_active_states do
+    tracker_active_states()
+  end
+
+  @spec azure_devops_terminal_states() :: [String.t()]
+  def azure_devops_terminal_states do
+    tracker_terminal_states()
+  end
+
+  @spec azure_devops_wiql() :: String.t() | nil
+  def azure_devops_wiql do
+    get_in(validated_workflow_options(), [:tracker, :wiql])
+    |> normalize_optional_value()
+  end
+
+  @spec azure_devops_work_item_types() :: [String.t()]
+  def azure_devops_work_item_types do
+    get_in(validated_workflow_options(), [:tracker, :work_item_types])
+  end
+
+  @spec azure_devops_area_paths() :: [String.t()]
+  def azure_devops_area_paths do
+    get_in(validated_workflow_options(), [:tracker, :area_paths])
+  end
+
+  @spec azure_devops_iteration_path() :: String.t() | nil
+  def azure_devops_iteration_path do
+    get_in(validated_workflow_options(), [:tracker, :iteration_path])
+    |> normalize_optional_value()
+  end
+
+  @spec azure_devops_api_version() :: String.t()
+  def azure_devops_api_version do
+    get_in(validated_workflow_options(), [:tracker, :api_version])
+    |> normalize_optional_value()
+    |> case do
+      nil -> @default_azure_devops_api_version
+      api_version -> api_version
+    end
   end
 
   @spec poll_interval_ms() :: pos_integer()
@@ -365,8 +458,7 @@ defmodule SymphonyElixir.Config do
   def validate! do
     with {:ok, _workflow} <- current_workflow(),
          :ok <- require_tracker_kind(),
-         :ok <- require_linear_token(),
-         :ok <- require_linear_project(),
+         :ok <- require_tracker_configuration(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
     end
@@ -389,33 +481,26 @@ defmodule SymphonyElixir.Config do
   defp require_tracker_kind do
     case tracker_kind() do
       "linear" -> :ok
+      "azure_devops" -> :ok
       "memory" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
     end
   end
 
-  defp require_linear_token do
+  defp require_tracker_configuration do
     case tracker_kind() do
       "linear" ->
-        if is_binary(linear_api_token()) do
+        with :ok <- require_tracker_api_token("linear"),
+             :ok <- require_tracker_project_reference("linear") do
           :ok
-        else
-          {:error, :missing_linear_api_token}
         end
 
-      _ ->
-        :ok
-    end
-  end
-
-  defp require_linear_project do
-    case tracker_kind() do
-      "linear" ->
-        if is_binary(linear_project_slug()) do
+      "azure_devops" ->
+        with :ok <- require_tracker_endpoint("azure_devops"),
+             :ok <- require_tracker_api_token("azure_devops"),
+             :ok <- require_tracker_project_reference("azure_devops") do
           :ok
-        else
-          {:error, :missing_linear_project_slug}
         end
 
       _ ->
@@ -463,8 +548,109 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
+    |> put_if_present(:project, scalar_string_value(Map.get(section, "project")))
+    |> put_if_present(:assignee, binary_value(Map.get(section, "assignee"), allow_empty: true))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
+    |> put_if_present(:wiql, binary_value(Map.get(section, "wiql"), allow_empty: true))
+    |> put_if_present(:work_item_types, csv_value(Map.get(section, "work_item_types")))
+    |> put_if_present(:area_paths, csv_value(Map.get(section, "area_paths")))
+    |> put_if_present(:iteration_path, scalar_string_value(Map.get(section, "iteration_path")))
+    |> put_if_present(:api_version, scalar_string_value(Map.get(section, "api_version")))
+  end
+
+  defp tracker_endpoint_for("linear") do
+    endpoint =
+      validated_workflow_options()
+      |> get_in([:tracker, :endpoint])
+      |> normalize_optional_value()
+
+    endpoint || @default_linear_endpoint
+  end
+
+  defp tracker_endpoint_for("azure_devops") do
+    validated_workflow_options()
+    |> get_in([:tracker, :endpoint])
+    |> normalize_optional_value()
+  end
+
+  defp tracker_endpoint_for(_kind), do: nil
+
+  defp tracker_api_token_for(kind) when kind in ["linear", "azure_devops"] do
+    validated_workflow_options()
+    |> get_in([:tracker, :api_key])
+    |> resolve_env_value(provider_token_env_fallback(kind))
+    |> normalize_secret_value()
+  end
+
+  defp tracker_api_token_for(_kind), do: nil
+
+  defp tracker_project_reference_for(kind) when kind in ["linear", "azure_devops"] do
+    validated_workflow_options()
+    |> get_in([:tracker, tracker_project_key(kind)])
+    |> normalize_optional_value()
+  end
+
+  defp tracker_project_reference_for(_kind), do: nil
+
+  defp tracker_assignee_for(kind) when kind in ["linear", "azure_devops"] do
+    validated_workflow_options()
+    |> get_in([:tracker, :assignee])
+    |> resolve_env_value(provider_assignee_env_fallback(kind))
+    |> normalize_secret_value()
+  end
+
+  defp tracker_assignee_for(_kind), do: nil
+
+  defp tracker_project_key("azure_devops"), do: :project
+  defp tracker_project_key(_kind), do: :project_slug
+
+  defp provider_token_env_fallback("linear"), do: System.get_env("LINEAR_API_KEY")
+  defp provider_token_env_fallback("azure_devops"), do: System.get_env("AZURE_DEVOPS_TOKEN")
+  defp provider_token_env_fallback(_kind), do: nil
+
+  defp provider_assignee_env_fallback("linear"), do: System.get_env("LINEAR_ASSIGNEE")
+  defp provider_assignee_env_fallback("azure_devops"), do: System.get_env("AZURE_DEVOPS_ASSIGNEE")
+  defp provider_assignee_env_fallback(_kind), do: nil
+
+  defp require_tracker_endpoint("azure_devops") do
+    if is_binary(azure_devops_endpoint()) do
+      :ok
+    else
+      {:error, :missing_azure_devops_endpoint}
+    end
+  end
+
+  defp require_tracker_api_token("linear") do
+    if is_binary(linear_api_token()) do
+      :ok
+    else
+      {:error, :missing_linear_api_token}
+    end
+  end
+
+  defp require_tracker_api_token("azure_devops") do
+    if is_binary(azure_devops_api_token()) do
+      :ok
+    else
+      {:error, :missing_azure_devops_api_token}
+    end
+  end
+
+  defp require_tracker_project_reference("linear") do
+    if is_binary(linear_project_slug()) do
+      :ok
+    else
+      {:error, :missing_linear_project_slug}
+    end
+  end
+
+  defp require_tracker_project_reference("azure_devops") do
+    if is_binary(azure_devops_project()) do
+      :ok
+    else
+      {:error, :missing_azure_devops_project}
+    end
   end
 
   defp extract_polling_options(section) do
@@ -926,6 +1112,15 @@ defmodule SymphonyElixir.Config do
       env_value -> env_value
     end
   end
+
+  defp normalize_optional_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_optional_value(_value), do: nil
 
   defp normalize_secret_value(value) when is_binary(value) do
     case String.trim(value) do

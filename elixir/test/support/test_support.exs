@@ -96,9 +96,15 @@ defmodule SymphonyElixir.TestSupport do
           tracker_endpoint: "https://api.linear.app/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
+          tracker_project: nil,
           tracker_assignee: nil,
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
+          tracker_wiql: nil,
+          tracker_work_item_types: nil,
+          tracker_area_paths: nil,
+          tracker_iteration_path: nil,
+          tracker_api_version: nil,
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           max_concurrent_agents: 10,
@@ -131,9 +137,15 @@ defmodule SymphonyElixir.TestSupport do
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
+    tracker_project = Keyword.get(config, :tracker_project)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
+    tracker_wiql = Keyword.get(config, :tracker_wiql)
+    tracker_work_item_types = Keyword.get(config, :tracker_work_item_types)
+    tracker_area_paths = Keyword.get(config, :tracker_area_paths)
+    tracker_iteration_path = Keyword.get(config, :tracker_iteration_path)
+    tracker_api_version = Keyword.get(config, :tracker_api_version)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -167,9 +179,15 @@ defmodule SymphonyElixir.TestSupport do
         "  endpoint: #{yaml_value(tracker_endpoint)}",
         "  api_key: #{yaml_value(tracker_api_token)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
+        "  project: #{yaml_value(tracker_project)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        "  wiql: #{yaml_value(tracker_wiql)}",
+        "  work_item_types: #{yaml_value(tracker_work_item_types)}",
+        "  area_paths: #{yaml_value(tracker_area_paths)}",
+        "  iteration_path: #{yaml_value(tracker_iteration_path)}",
+        "  api_version: #{yaml_value(tracker_api_version)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
@@ -199,7 +217,12 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    escaped_value =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
+    "\"" <> escaped_value <> "\""
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)

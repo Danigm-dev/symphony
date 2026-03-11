@@ -2,11 +2,60 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   use ExUnit.Case, async: false
 
   alias Mix.Tasks.Workspace.BeforeRemove
+  alias SymphonyElixir.Workflow
 
   import ExUnit.CaptureIO
+  import SymphonyElixir.TestSupport, only: [write_workflow_file!: 2]
+
+  defmodule FakeAzureCleanupClient do
+    def raw_request(method, path, request_opts) do
+      send(self(), {:azure_request, method, path, request_opts})
+
+      case {method, path} do
+        {:get, "/Symphony/_apis/git/pullrequests"} ->
+          {:ok, %{"value" => [%{"pullRequestId" => 501}, %{"pullRequestId" => 502}]}}
+
+        {:post, "/Symphony/_apis/git/repositories/Symphony/pullRequests/501/threads"} ->
+          {:ok, %{"id" => 1}}
+
+        {:patch, "/Symphony/_apis/git/repositories/Symphony/pullRequests/501"} ->
+          {:ok, %{"pullRequestId" => 501, "status" => "abandoned"}}
+
+        {:post, "/Symphony/_apis/git/repositories/Symphony/pullRequests/502/threads"} ->
+          {:ok, %{"id" => 2}}
+
+        {:patch, "/Symphony/_apis/git/repositories/Symphony/pullRequests/502"} ->
+          {:error, {:azure_devops_api_status, 409}}
+
+        _ ->
+          {:error, :unexpected_request}
+      end
+    end
+  end
+
+  defmodule FakeInferredAzureCleanupClient do
+    def raw_request(method, path, request_opts) do
+      send(self(), {:azure_request_inferred, method, path, request_opts})
+
+      case {method, path} do
+        {:get, "/Symphony/_apis/git/pullrequests"} ->
+          {:ok, %{"value" => [%{"pullRequestId" => 601}]}}
+
+        {:post, "/Symphony/_apis/git/repositories/inferred-repo/pullRequests/601/threads"} ->
+          {:ok, %{"id" => 1}}
+
+        {:patch, "/Symphony/_apis/git/repositories/inferred-repo/pullRequests/601"} ->
+          {:ok, %{"pullRequestId" => 601, "status" => "abandoned"}}
+
+        _ ->
+          {:error, :unexpected_request}
+      end
+    end
+  end
 
   setup do
     Mix.Task.reenable("workspace.before_remove")
+    Application.delete_env(:symphony_elixir, :workspace_before_remove_azure_client_module)
     :ok
   end
 
@@ -254,6 +303,98 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     )
   end
 
+  test "infers Azure cleanup from WORKFLOW.md and tolerates abandon failures" do
+    with_workflow_file(
+      [
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony"
+      ],
+      fn ->
+        Application.put_env(
+          :symphony_elixir,
+          :workspace_before_remove_azure_client_module,
+          FakeAzureCleanupClient
+        )
+
+        {output, error_output} =
+          capture_task_output(fn ->
+            BeforeRemove.run(["--repo", "Symphony", "--branch", "feature/workpad"])
+          end)
+
+        assert output =~ "Abandoned Azure PR #501 for branch feature/workpad"
+        assert error_output =~ "Failed to abandon Azure PR #502 for branch feature/workpad"
+
+        assert_receive {:azure_request, :get, "/Symphony/_apis/git/pullrequests", list_opts}
+        assert list_opts.query["searchCriteria.repositoryId"] == "Symphony"
+        assert list_opts.query["searchCriteria.sourceRefName"] == "refs/heads/feature/workpad"
+        assert list_opts.query["searchCriteria.status"] == "active"
+
+        assert_receive {:azure_request, :post, "/Symphony/_apis/git/repositories/Symphony/pullRequests/501/threads", thread_opts}
+
+        assert get_in(thread_opts, [:body, "comments", Access.at(0), "content"]) =~
+                 "tracked issue for branch feature/workpad entered a terminal state without merge"
+
+        assert_receive {:azure_request, :patch, "/Symphony/_apis/git/repositories/Symphony/pullRequests/501", patch_opts}
+        assert patch_opts.body == %{"status" => "abandoned"}
+        assert_receive {:azure_request, :post, "/Symphony/_apis/git/repositories/Symphony/pullRequests/502/threads", _thread_opts}
+        assert_receive {:azure_request, :patch, "/Symphony/_apis/git/repositories/Symphony/pullRequests/502", _patch_opts}
+      end
+    )
+  end
+
+  test "infers Azure repo name from git remote when repo option is omitted" do
+    with_workflow_file(
+      [
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony"
+      ],
+      fn ->
+        Application.put_env(
+          :symphony_elixir,
+          :workspace_before_remove_azure_client_module,
+          FakeInferredAzureCleanupClient
+        )
+
+        with_fake_gh_and_git(
+          """
+          #!/bin/sh
+          exit 99
+          """,
+          """
+          #!/bin/sh
+          if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "remote.origin.url" ]; then
+            printf 'https://dev.azure.com/openai/Symphony/_git/inferred-repo\n'
+            exit 0
+          fi
+
+          exit 99
+          """,
+          fn _log_path ->
+            output =
+              capture_io(fn ->
+                BeforeRemove.run(["--branch", "feature/inferred"])
+              end)
+
+            assert output =~ "Abandoned Azure PR #601 for branch feature/inferred"
+          end
+        )
+
+        assert_receive {:azure_request_inferred, :get, "/Symphony/_apis/git/pullrequests", list_opts}
+        assert list_opts.query["searchCriteria.repositoryId"] == "inferred-repo"
+
+        assert_receive {:azure_request_inferred, :post, "/Symphony/_apis/git/repositories/inferred-repo/pullRequests/601/threads", _thread_opts}
+
+        assert_receive {:azure_request_inferred, :patch, "/Symphony/_apis/git/repositories/inferred-repo/pullRequests/601", _patch_opts}
+      end
+    )
+  end
+
   defp with_fake_gh(fun) do
     with_fake_binaries(
       %{
@@ -386,5 +527,25 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       end
 
     {output, error_output}
+  end
+
+  defp with_workflow_file(overrides, fun) do
+    unique = System.unique_integer([:positive, :monotonic])
+    root = Path.join(System.tmp_dir!(), "workspace-before-remove-workflow-#{unique}")
+    workflow_path = Path.join(root, "WORKFLOW.md")
+    original_workflow_path = Workflow.workflow_file_path()
+
+    File.rm_rf!(root)
+    File.mkdir_p!(root)
+    write_workflow_file!(workflow_path, overrides)
+    Workflow.set_workflow_file_path(workflow_path)
+
+    try do
+      fun.()
+    after
+      Workflow.set_workflow_file_path(original_workflow_path)
+      Application.delete_env(:symphony_elixir, :workspace_before_remove_azure_client_module)
+      File.rm_rf!(root)
+    end
   end
 end

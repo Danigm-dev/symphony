@@ -40,6 +40,16 @@ defmodule SymphonyElixir.AzureDevOps.Client do
           (atom(), String.t(), request_opts() -> {:ok, request_response()} | {:error, term()})
   @type assignee_filter :: %{configured_assignee: String.t(), match_values: MapSet.t(String.t())}
 
+  @spec raw_request(atom(), String.t(), request_opts()) :: {:ok, term()} | {:error, term()}
+  def raw_request(method, path, request_opts \\ %{})
+
+  def raw_request(method, path, request_opts)
+      when is_atom(method) and is_binary(path) and is_map(request_opts) do
+    with :ok <- require_api_token() do
+      request(method, path, request_opts, [])
+    end
+  end
+
   @spec fetch_candidate_issues(keyword()) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues(opts \\ []) do
     with :ok <- require_api_token(),

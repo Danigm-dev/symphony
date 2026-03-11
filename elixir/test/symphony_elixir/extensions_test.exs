@@ -205,6 +205,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "azure_devops")
+    assert SymphonyElixir.Tracker.adapter() == SymphonyElixir.AzureDevOps.Adapter
+  end
+
+  test "tracker raises explicit errors for missing or unsupported tracker kinds" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: nil)
+    assert_raise ArgumentError, "missing tracker kind", fn -> SymphonyElixir.Tracker.adapter() end
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "jira")
+
+    assert_raise ArgumentError, ~r/^unsupported tracker kind: "jira"$/, fn ->
+      SymphonyElixir.Tracker.adapter()
+    end
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

@@ -68,7 +68,10 @@ defmodule SymphonyElixir.Config do
                                  work_item_types: [type: {:list, :string}, default: []],
                                  area_paths: [type: {:list, :string}, default: []],
                                  iteration_path: [type: {:or, [:string, nil]}, default: nil],
-                                 api_version: [type: {:or, [:string, nil]}, default: nil]
+                                 api_version: [type: {:or, [:string, nil]}, default: nil],
+                                 repository: [type: {:or, [:string, nil]}, default: nil],
+                                 target_branch: [type: {:or, [:string, nil]}, default: nil],
+                                 required_reviewers: [type: {:list, :string}, default: []]
                                ]
                              ],
                              polling: [
@@ -310,6 +313,23 @@ defmodule SymphonyElixir.Config do
       nil -> @default_azure_devops_api_version
       api_version -> api_version
     end
+  end
+
+  @spec azure_devops_repository() :: String.t() | nil
+  def azure_devops_repository do
+    get_in(validated_workflow_options(), [:tracker, :repository])
+    |> normalize_optional_value()
+  end
+
+  @spec azure_devops_target_branch() :: String.t() | nil
+  def azure_devops_target_branch do
+    get_in(validated_workflow_options(), [:tracker, :target_branch])
+    |> normalize_optional_value()
+  end
+
+  @spec azure_devops_required_reviewers() :: [String.t()]
+  def azure_devops_required_reviewers do
+    get_in(validated_workflow_options(), [:tracker, :required_reviewers])
   end
 
   @spec poll_interval_ms() :: pos_integer()
@@ -555,6 +575,9 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:area_paths, csv_value(Map.get(section, "area_paths")))
     |> put_if_present(:iteration_path, scalar_string_value(Map.get(section, "iteration_path")))
     |> put_if_present(:api_version, scalar_string_value(Map.get(section, "api_version")))
+    |> put_if_present(:repository, scalar_string_value(Map.get(section, "repository")))
+    |> put_if_present(:target_branch, scalar_string_value(Map.get(section, "target_branch")))
+    |> put_if_present(:required_reviewers, csv_value(Map.get(section, "required_reviewers")))
   end
 
   defp tracker_endpoint_for("linear") do

@@ -160,7 +160,10 @@ defmodule SymphonyElixir.CoreTest do
       tracker_work_item_types: "User Story, Bug",
       tracker_area_paths: "Platform, Agents",
       tracker_iteration_path: "FY26\\Sprint 1",
-      tracker_api_version: ""
+      tracker_api_version: "",
+      tracker_repository: "SymphonyRepo",
+      tracker_target_branch: "main",
+      tracker_required_reviewers: "alice@example.com, bob@example.com"
     )
 
     assert Config.tracker_endpoint() == "https://dev.azure.com/openai"
@@ -180,6 +183,9 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.azure_devops_area_paths() == ["Platform", "Agents"]
     assert Config.azure_devops_iteration_path() == "FY26\\Sprint 1"
     assert Config.azure_devops_api_version() == "7.1"
+    assert Config.azure_devops_repository() == "SymphonyRepo"
+    assert Config.azure_devops_target_branch() == "main"
+    assert Config.azure_devops_required_reviewers() == ["alice@example.com", "bob@example.com"]
     assert :ok = Config.validate!()
   end
 

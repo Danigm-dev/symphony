@@ -449,6 +449,267 @@ defmodule SymphonyElixir.AzureDevOpsAdapterTest do
              Client.list_comments("101", request_fun: unknown_payload_fun)
   end
 
+  test "azure client helper wrappers cover normalization fallbacks" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: nil
+    )
+
+    assert Client.normalize_work_item_for_test(nil) == nil
+
+    issue =
+      Client.normalize_work_item_for_test(
+        %{
+          "id" => nil,
+          "fields" => %{
+            "System.AssignedTo" => " worker@example.com ",
+            "Microsoft.VSTS.Common.Priority" => "urgent",
+            "System.CreatedDate" => "not-a-date",
+            "System.ChangedDate" => 123
+          },
+          "relations" => [
+            %{"rel" => "System.LinkTypes.Dependency-Reverse", "url" => "https://example.test/workItems/42"},
+            %{"rel" => "System.LinkTypes.Dependency-Reverse", "url" => "bad-url"},
+            %{"rel" => "System.LinkTypes.Dependency-Reverse", "url" => nil},
+            %{"rel" => "ArtifactLink", "url" => "https://example.test/workItems/77"}
+          ]
+        },
+        %{},
+        "someone@example.com"
+      )
+
+    assert issue.id == nil
+    assert issue.identifier == nil
+    assert issue.url == nil
+    assert issue.assignee_id == " worker@example.com "
+    assert issue.blocked_by == [%{id: "42", identifier: "AB#42", state: nil}]
+    assert issue.priority == nil
+    assert issue.created_at == nil
+    assert issue.updated_at == nil
+    refute issue.assigned_to_worker
+
+    assert Client.extract_branch_name_for_test("invalid") == nil
+
+    nonbinary_assignee_issue =
+      Client.normalize_work_item_for_test(%{
+        "id" => 12,
+        "fields" => %{"System.AssignedTo" => 99}
+      })
+
+    assert nonbinary_assignee_issue.assignee_id == nil
+    assert nonbinary_assignee_issue.assigned_to_worker
+
+    me_assignee_issue =
+      Client.normalize_work_item_for_test(%{"id" => 13, "fields" => %{}}, %{}, "me")
+
+    assert me_assignee_issue.id == "13"
+    assert me_assignee_issue.assigned_to_worker
+
+    blank_assignee_issue =
+      Client.normalize_work_item_for_test(
+        %{
+          "id" => 14,
+          "fields" => %{
+            "Microsoft.VSTS.Common.Priority" => " 2 "
+          },
+          "relations" => [123]
+        },
+        %{},
+        "   "
+      )
+
+    assert blank_assignee_issue.priority == 2
+    assert blank_assignee_issue.blocked_by == []
+    assert blank_assignee_issue.assigned_to_worker
+
+    assert Client.assigned_to_worker_for_test(" worker@example.com ", %{match_values: MapSet.new(["worker@example.com"])})
+    refute Client.assigned_to_worker_for_test("   ", %{match_values: MapSet.new(["worker@example.com"])})
+    refute Client.assigned_to_worker_for_test(123, %{match_values: MapSet.new(["worker@example.com"])})
+    refute Client.assigned_to_worker_for_test("worker@example.com", %{})
+    assert Client.azure_id_for_request_for_test(123) == 123
+    assert Client.azure_id_for_request_for_test("123") == 123
+    assert Client.azure_id_for_request_for_test("AB-123") == "AB-123"
+    assert Client.encode_path_segment_for_test(nil) == ""
+  end
+
+  test "azure client wiql helper covers default args and assignee branches" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: nil,
+      tracker_work_item_types: [],
+      tracker_area_paths: [],
+      tracker_iteration_path: nil
+    )
+
+    wiql_without_assignee = Client.build_wiql_for_test(["New"])
+    refute wiql_without_assignee =~ "[System.AssignedTo]"
+
+    wiql_with_blank_assignee = Client.build_wiql_for_test(["New"], "   ")
+    refute wiql_with_blank_assignee =~ "[System.AssignedTo]"
+
+    wiql_with_me = Client.build_wiql_for_test(["New"], "me")
+    assert wiql_with_me =~ "[System.AssignedTo] = @Me"
+
+    wiql_with_explicit_assignee = Client.build_wiql_for_test(["New"], "worker@example.com")
+    assert wiql_with_explicit_assignee =~ "[System.AssignedTo] = 'worker@example.com'"
+  end
+
+  test "azure client public defaults short-circuit without opts" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: nil
+    )
+
+    assert {:error, :missing_azure_devops_api_token} = Client.fetch_candidate_issues()
+    assert {:ok, []} = Client.fetch_issues_by_states([" ", nil])
+    assert {:ok, []} = Client.fetch_issue_states_by_ids([nil, " "])
+    assert {:error, :missing_azure_devops_api_token} = Client.create_comment("101", "body")
+    assert {:error, :missing_azure_devops_api_token} = Client.list_comments("101")
+    assert {:error, :missing_azure_devops_api_token} = Client.update_comment("101", 88, "body")
+    assert {:error, :missing_azure_devops_api_token} = Client.update_issue_state("101", "Done")
+  end
+
+  test "azure client covers wiql and batch payload fallbacks" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: nil,
+      tracker_wiql: nil,
+      tracker_work_item_types: [],
+      tracker_area_paths: [],
+      tracker_iteration_path: nil
+    )
+
+    nil_wiql_request_fun = fn :post, "/Symphony/_apis/wit/wiql", request_opts ->
+      send(self(), {:nil_wiql_request, request_opts})
+      {:ok, %{status: 200, body: %{"workItems" => nil}}}
+    end
+
+    assert {:ok, []} = Client.fetch_candidate_issues(request_fun: nil_wiql_request_fun)
+    assert_receive {:nil_wiql_request, nil_wiql_opts}
+    assert nil_wiql_opts.body["query"] =~ "[System.TeamProject] = 'Symphony'"
+
+    unknown_wiql_payload_fun = fn :post, "/Symphony/_apis/wit/wiql", _request_opts ->
+      {:ok, %{status: 200, body: %{"count" => 1}}}
+    end
+
+    assert {:error, :azure_devops_unknown_payload} =
+             Client.fetch_issues_by_states(["New"], request_fun: unknown_wiql_payload_fun)
+
+    state_batch_fun = fn :post, path, request_opts ->
+      send(self(), {:state_batch_request, path, request_opts})
+      {:ok, %{status: 200, body: %{"value" => [%{"id" => nil}]}}}
+    end
+
+    assert {:ok, []} = Client.fetch_issue_states_by_ids(["AB-123"], request_fun: state_batch_fun)
+
+    assert_receive {:state_batch_request, "/Symphony/_apis/wit/workitemsbatch", state_batch_opts}
+    assert state_batch_opts.body["ids"] == ["AB-123"]
+
+    unknown_batch_fun = fn :post, "/Symphony/_apis/wit/workitemsbatch", _request_opts ->
+      {:ok, %{status: 200, body: %{"count" => 1}}}
+    end
+
+    assert {:error, :azure_devops_unknown_payload} =
+             Client.fetch_issue_states_by_ids(["101"], request_fun: unknown_batch_fun)
+
+    error_batch_fun = fn :post, "/Symphony/_apis/wit/workitemsbatch", _request_opts ->
+      {:error, :azure_boom}
+    end
+
+    assert {:error, {:azure_devops_api_request, :azure_boom}} =
+             Client.list_comments("101", request_fun: fn _, _, _ -> {:error, :azure_boom} end)
+
+    assert {:error, {:azure_devops_api_request, :azure_boom}} =
+             Client.fetch_issue_states_by_ids(["101"], request_fun: error_batch_fun)
+
+    assert {:ok, []} =
+             Client.list_comments(
+               "101",
+               request_fun: fn :get, _path, _request_opts ->
+                 {:ok, %{status: 200, body: %{"comments" => nil}}}
+               end
+             )
+  end
+
+  test "azure client logs connectionData failures and missing authenticated users" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "https://dev.azure.com/openai",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: "me"
+    )
+
+    long_body = String.duplicate("x", 1_100)
+
+    status_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:azure_devops_api_status, 500}} =
+                 Client.fetch_candidate_issues(
+                   request_fun: fn :get, "/_apis/connectionData", _request_opts ->
+                     {:ok, %{status: 500, body: long_body}}
+                   end
+                 )
+      end)
+
+    assert status_log =~ "Azure DevOps request failed status=500"
+    assert status_log =~ "path=\"/_apis/connectionData\""
+    assert status_log =~ "<truncated>"
+
+    request_log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:azure_devops_api_request, :timeout}} =
+                 Client.fetch_candidate_issues(
+                   request_fun: fn :get, "/_apis/connectionData", _request_opts ->
+                     {:error, :timeout}
+                   end
+                 )
+      end)
+
+    assert request_log =~ "Azure DevOps request failed: :timeout"
+
+    assert {:error, :missing_azure_devops_authenticated_identity} =
+             Client.fetch_candidate_issues(
+               request_fun: fn :get, "/_apis/connectionData", _request_opts ->
+                 {:ok, %{status: 200, body: %{"authenticatedUser" => "not-a-map"}}}
+               end
+             )
+  end
+
+  test "azure client default request path covers Req integration" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "azure_devops",
+      tracker_endpoint: "http://127.0.0.1:1",
+      tracker_api_token: "azure-token",
+      tracker_project_slug: nil,
+      tracker_project: "Symphony",
+      tracker_assignee: nil
+    )
+
+    assert {:error, {:azure_devops_api_request, _reason}} =
+             Client.raw_request(:get, "/_apis/connectionData")
+
+    assert {:error, {:azure_devops_api_request, _reason}} =
+             Client.raw_request(:post, "/_apis/test", %{body: %{"ping" => "pong"}})
+  end
+
   test "azure client write primitives fail structurally when api token is missing" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "azure_devops",

@@ -55,9 +55,8 @@ defmodule SymphonyElixir.AzureDevOps.Client do
   def fetch_candidate_issues(opts \\ []) do
     with :ok <- require_api_token(),
          {:ok, assignee_filter} <- routing_assignee_filter(opts),
-         {:ok, issue_ids} <- query_by_wiql(candidate_wiql(), opts),
-         {:ok, issues} <- hydrate_work_items(issue_ids, assignee_filter, opts) do
-      {:ok, issues}
+         {:ok, issue_ids} <- query_by_wiql(candidate_wiql(), opts) do
+      hydrate_work_items(issue_ids, assignee_filter, opts)
     end
   end
 
@@ -75,9 +74,8 @@ defmodule SymphonyElixir.AzureDevOps.Client do
 
       states ->
         with :ok <- require_api_token(),
-             {:ok, issue_ids} <- query_by_wiql(build_wiql(states, nil), opts),
-             {:ok, issues} <- hydrate_work_items(issue_ids, nil, opts) do
-          {:ok, issues}
+             {:ok, issue_ids} <- query_by_wiql(build_wiql(states, nil), opts) do
+          hydrate_work_items(issue_ids, nil, opts)
         end
     end
   end
@@ -96,9 +94,8 @@ defmodule SymphonyElixir.AzureDevOps.Client do
 
       ids ->
         with :ok <- require_api_token(),
-             {:ok, assignee_filter} <- routing_assignee_filter(opts),
-             {:ok, issues} <- hydrate_work_items(ids, assignee_filter, opts) do
-          {:ok, issues}
+             {:ok, assignee_filter} <- routing_assignee_filter(opts) do
+          hydrate_work_items(ids, assignee_filter, opts)
         end
     end
   end
@@ -179,20 +176,9 @@ defmodule SymphonyElixir.AzureDevOps.Client do
   end
 
   @doc false
-  @spec normalize_work_item_for_test(map(), map(), String.t() | nil) :: Issue.t() | nil
-  def normalize_work_item_for_test(work_item, blockers_by_id \\ %{}, assignee \\ nil) when is_map(work_item) do
-    assignee_filter =
-      case assignee do
-        value when is_binary(value) ->
-          case build_assignee_filter(value, fn _, _, _ -> {:error, :not_available_for_test} end) do
-            {:ok, filter} -> filter
-            {:error, _reason} -> nil
-          end
-
-        _ ->
-          nil
-      end
-
+  @spec normalize_work_item_for_test(term(), map(), term()) :: Issue.t() | nil
+  def normalize_work_item_for_test(work_item, blockers_by_id \\ %{}, assignee \\ nil) do
+    assignee_filter = assignee_filter_for_test(assignee)
     normalize_work_item(work_item, blockers_by_id, assignee_filter)
   end
 
@@ -201,6 +187,24 @@ defmodule SymphonyElixir.AzureDevOps.Client do
   def build_wiql_for_test(state_names, assignee \\ nil) when is_list(state_names) do
     build_wiql(state_names, assignee)
   end
+
+  @doc false
+  @spec assigned_to_worker_for_test(term(), term()) :: boolean()
+  def assigned_to_worker_for_test(assignee, assignee_filter) do
+    assigned_to_worker?(assignee, assignee_filter)
+  end
+
+  @doc false
+  @spec extract_branch_name_for_test(term(), term()) :: String.t() | nil
+  def extract_branch_name_for_test(fields, relations \\ nil), do: extract_branch_name(fields, relations)
+
+  @doc false
+  @spec azure_id_for_request_for_test(term()) :: term()
+  def azure_id_for_request_for_test(issue_id), do: azure_id_for_request(issue_id)
+
+  @doc false
+  @spec encode_path_segment_for_test(term()) :: String.t()
+  def encode_path_segment_for_test(value), do: encode_path_segment(value)
 
   defp require_api_token do
     if is_binary(Config.azure_devops_api_token()) do
@@ -334,36 +338,7 @@ defmodule SymphonyElixir.AzureDevOps.Client do
       issue_ids
       |> Enum.chunk_every(@batch_size)
       |> Enum.reduce_while({:ok, %{}}, fn issue_id_chunk, {:ok, acc} ->
-        case request(
-               :post,
-               project_path("/_apis/wit/workitemsbatch"),
-               %{
-                 body: %{
-                   "ids" => Enum.map(issue_id_chunk, &azure_id_for_request/1),
-                   "fields" => @work_item_fields,
-                   "$expand" => @work_item_expand,
-                   "errorPolicy" => "Omit"
-                 }
-               },
-               opts
-             ) do
-          {:ok, %{"value" => work_items}} when is_list(work_items) ->
-            updated_acc =
-              Enum.reduce(work_items, acc, fn work_item, items_acc ->
-                case normalize_issue_id(work_item["id"]) do
-                  nil -> items_acc
-                  issue_id -> Map.put(items_acc, issue_id, work_item)
-                end
-              end)
-
-            {:cont, {:ok, updated_acc}}
-
-          {:ok, _body} ->
-            {:halt, {:error, :azure_devops_unknown_payload}}
-
-          {:error, reason} ->
-            {:halt, {:error, reason}}
-        end
+        fetch_work_item_chunk(issue_id_chunk, acc, opts)
       end)
 
     case items do
@@ -424,22 +399,7 @@ defmodule SymphonyElixir.AzureDevOps.Client do
 
     case request_fun.(:get, @connection_data_path, request_opts) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
-        case get_in(body, ["authenticatedUser"]) do
-          user when is_map(user) ->
-            match_values =
-              user
-              |> assignee_identity_values()
-              |> MapSet.new()
-
-            if MapSet.size(match_values) == 0 do
-              {:error, :missing_azure_devops_authenticated_identity}
-            else
-              {:ok, %{configured_assignee: "me", match_values: match_values}}
-            end
-
-          _ ->
-            {:error, :missing_azure_devops_authenticated_identity}
-        end
+        build_current_user_filter(get_in(body, ["authenticatedUser"]))
 
       {:ok, response} ->
         Logger.error(
@@ -483,27 +443,7 @@ defmodule SymphonyElixir.AzureDevOps.Client do
 
   defp extract_blockers(%{"relations" => relations}, blockers_by_id) when is_list(relations) and is_map(blockers_by_id) do
     relations
-    |> Enum.flat_map(fn relation ->
-      if blocker_relation?(relation) do
-        case parse_relation_work_item_id(relation["url"]) do
-          nil ->
-            []
-
-          blocker_id ->
-            blocker_issue = Map.get(blockers_by_id, blocker_id)
-
-            [
-              %{
-                id: blocker_id,
-                identifier: issue_identifier(blocker_id),
-                state: blocker_issue_state(blocker_issue)
-              }
-            ]
-        end
-      else
-        []
-      end
-    end)
+    |> Enum.flat_map(&extract_blocker_relation(&1, blockers_by_id))
     |> Enum.uniq_by(& &1.id)
   end
 
@@ -511,6 +451,91 @@ defmodule SymphonyElixir.AzureDevOps.Client do
 
   defp blocker_issue_state(%{"fields" => fields}) when is_map(fields), do: Map.get(fields, "System.State")
   defp blocker_issue_state(_blocker_issue), do: nil
+
+  defp assignee_filter_for_test(assignee) when is_binary(assignee) do
+    case build_assignee_filter(assignee, fn _, _, _ -> {:error, :not_available_for_test} end) do
+      {:ok, filter} -> filter
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp assignee_filter_for_test(_assignee), do: nil
+
+  defp fetch_work_item_chunk(issue_id_chunk, acc, opts) do
+    issue_id_chunk
+    |> work_items_batch_request()
+    |> then(&request(:post, project_path("/_apis/wit/workitemsbatch"), &1, opts))
+    |> case do
+      {:ok, %{"value" => work_items}} when is_list(work_items) ->
+        {:cont, {:ok, merge_work_items_by_id(acc, work_items)}}
+
+      {:ok, _body} ->
+        {:halt, {:error, :azure_devops_unknown_payload}}
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp work_items_batch_request(issue_id_chunk) do
+    %{
+      body: %{
+        "ids" => Enum.map(issue_id_chunk, &azure_id_for_request/1),
+        "fields" => @work_item_fields,
+        "$expand" => @work_item_expand,
+        "errorPolicy" => "Omit"
+      }
+    }
+  end
+
+  defp merge_work_items_by_id(acc, work_items) do
+    Enum.reduce(work_items, acc, fn work_item, items_acc ->
+      case normalize_issue_id(work_item["id"]) do
+        nil -> items_acc
+        issue_id -> Map.put(items_acc, issue_id, work_item)
+      end
+    end)
+  end
+
+  defp build_current_user_filter(user) when is_map(user) do
+    match_values =
+      user
+      |> assignee_identity_values()
+      |> MapSet.new()
+
+    if MapSet.size(match_values) == 0 do
+      {:error, :missing_azure_devops_authenticated_identity}
+    else
+      {:ok, %{configured_assignee: "me", match_values: match_values}}
+    end
+  end
+
+  defp build_current_user_filter(_user), do: {:error, :missing_azure_devops_authenticated_identity}
+
+  defp extract_blocker_relation(relation, blockers_by_id) do
+    if blocker_relation?(relation) do
+      relation
+      |> Map.get("url")
+      |> parse_relation_work_item_id()
+      |> build_blocker_payload(blockers_by_id)
+    else
+      []
+    end
+  end
+
+  defp build_blocker_payload(nil, _blockers_by_id), do: []
+
+  defp build_blocker_payload(blocker_id, blockers_by_id) do
+    blocker_issue = Map.get(blockers_by_id, blocker_id)
+
+    [
+      %{
+        id: blocker_id,
+        identifier: issue_identifier(blocker_id),
+        state: blocker_issue_state(blocker_issue)
+      }
+    ]
+  end
 
   defp extract_blocker_ids_from_relations(%{"relations" => relations}) when is_list(relations) do
     relations

@@ -443,22 +443,9 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_azure_devops_method(arguments) do
-    case Map.get(arguments, "method") || Map.get(arguments, :method) do
-      method when is_binary(method) ->
-        case method |> String.trim() |> String.upcase() do
-          "" ->
-            {:error, :missing_azure_devops_request_method}
-
-          normalized_method ->
-            case Map.fetch(@azure_devops_methods, normalized_method) do
-              {:ok, atom_method} -> {:ok, atom_method}
-              :error -> {:error, :invalid_azure_devops_request_method}
-            end
-        end
-
-      _ ->
-        {:error, :missing_azure_devops_request_method}
-    end
+    arguments
+    |> Map.get("method", Map.get(arguments, :method))
+    |> normalize_azure_devops_method_value()
   end
 
   defp normalize_azure_devops_path(arguments) do
@@ -531,25 +518,54 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_absolute_azure_devops_path(parsed_path, configured_endpoint, endpoint_uri) do
-    if same_endpoint_origin?(parsed_path, endpoint_uri) do
-      absolute_path = parsed_path.path || "/"
-      endpoint_prefix = endpoint_path_prefix(endpoint_uri)
+    with :ok <- ensure_same_azure_devops_origin(parsed_path, configured_endpoint, endpoint_uri),
+         :ok <- ensure_absolute_path_on_endpoint(parsed_path, configured_endpoint, endpoint_uri) do
+      parsed_path
+      |> Map.get(:path, "/")
+      |> String.replace_prefix(endpoint_path_prefix(endpoint_uri), "")
+      |> normalize_stripped_azure_devops_path()
+    end
+  end
 
-      if String.starts_with?(absolute_path, endpoint_prefix) do
-        stripped_path = String.replace_prefix(absolute_path, endpoint_prefix, "")
+  defp normalize_azure_devops_method_value(method) when is_binary(method) do
+    method
+    |> String.trim()
+    |> String.upcase()
+    |> case do
+      "" ->
+        {:error, :missing_azure_devops_request_method}
 
-        case stripped_path do
-          "" -> {:ok, "/"}
-          "/" <> _rest -> {:ok, stripped_path}
-          _ -> {:error, :invalid_azure_devops_request_path}
+      normalized_method ->
+        case Map.fetch(@azure_devops_methods, normalized_method) do
+          {:ok, atom_method} -> {:ok, atom_method}
+          :error -> {:error, :invalid_azure_devops_request_method}
         end
-      else
-        {:error, {:azure_devops_request_cross_host, configured_endpoint, URI.to_string(parsed_path)}}
-      end
+    end
+  end
+
+  defp normalize_azure_devops_method_value(_method), do: {:error, :missing_azure_devops_request_method}
+
+  defp ensure_same_azure_devops_origin(parsed_path, configured_endpoint, endpoint_uri) do
+    if same_endpoint_origin?(parsed_path, endpoint_uri) do
+      :ok
     else
       {:error, {:azure_devops_request_cross_host, configured_endpoint, URI.to_string(parsed_path)}}
     end
   end
+
+  defp ensure_absolute_path_on_endpoint(parsed_path, configured_endpoint, endpoint_uri) do
+    absolute_path = parsed_path.path || "/"
+
+    if String.starts_with?(absolute_path, endpoint_path_prefix(endpoint_uri)) do
+      :ok
+    else
+      {:error, {:azure_devops_request_cross_host, configured_endpoint, URI.to_string(parsed_path)}}
+    end
+  end
+
+  defp normalize_stripped_azure_devops_path(""), do: {:ok, "/"}
+  defp normalize_stripped_azure_devops_path("/" <> _rest = stripped_path), do: {:ok, stripped_path}
+  defp normalize_stripped_azure_devops_path(_stripped_path), do: {:error, :invalid_azure_devops_request_path}
 
   defp same_endpoint_origin?(request_uri, endpoint_uri) do
     normalized_port = fn uri ->
@@ -574,7 +590,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     |> String.trim_trailing("/")
   end
 
-  defp normalize_json_object(value, error_reason) when is_map(value) do
+  defp normalize_json_object(value, error_reason) when is_map(value) and not is_struct(value) do
     value
     |> Enum.reduce_while({:ok, %{}}, fn {key, nested_value}, {:ok, acc} ->
       with {:ok, normalized_key} <- normalize_json_key(key, error_reason),

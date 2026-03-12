@@ -53,9 +53,49 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
     end
   end
 
+  defmodule FakeAzureUnexpectedPayloadClient do
+    def raw_request(method, path, request_opts) do
+      send(self(), {:azure_request_unexpected, method, path, request_opts})
+
+      case {method, path} do
+        {:get, "/Symphony/_apis/git/pullrequests"} -> {:ok, %{"count" => 1}}
+        _ -> {:error, :unexpected_request}
+      end
+    end
+  end
+
+  defmodule FakeAzureListErrorClient do
+    def raw_request(method, path, request_opts) do
+      send(self(), {:azure_request_error, method, path, request_opts})
+
+      case {method, path} do
+        {:get, "/Symphony/_apis/git/pullrequests"} -> {:error, :azure_boom}
+        _ -> {:error, :unexpected_request}
+      end
+    end
+  end
+
   setup do
+    workflow_root =
+      Path.join(
+        System.tmp_dir!(),
+        "workspace-before-remove-workflow-setup-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    workflow_path = Path.join(workflow_root, "WORKFLOW.md")
+    File.mkdir_p!(workflow_root)
+    write_workflow_file!(workflow_path, tracker_kind: "linear")
+    original_workflow_path = Workflow.workflow_file_path()
+    Workflow.set_workflow_file_path(workflow_path)
+
     Mix.Task.reenable("workspace.before_remove")
     Application.delete_env(:symphony_elixir, :workspace_before_remove_azure_client_module)
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+      File.rm_rf!(workflow_root)
+    end)
+
     :ok
   end
 
@@ -299,6 +339,178 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
         log = File.read!(log_path)
         assert log =~ "auth status"
         refute log =~ "pr list"
+      end
+    )
+  end
+
+  test "helper wrappers normalize provider, repo names, refs, and identifiers" do
+    assert BeforeRemove.normalize_provider_for_test(nil) == nil
+    assert BeforeRemove.normalize_provider_for_test("   ") == nil
+    assert BeforeRemove.normalize_provider_for_test("azure") == "azure_devops"
+    assert BeforeRemove.normalize_provider_for_test("azure_devops") == "azure_devops"
+    assert BeforeRemove.normalize_provider_for_test("github") == "github"
+
+    assert_raise Mix.Error, "Unsupported provider: jira", fn ->
+      BeforeRemove.normalize_provider_for_test("jira")
+    end
+
+    assert BeforeRemove.parse_repo_name_from_remote_url_for_test("https://dev.azure.com/openai/Symphony/_git/inferred-repo.git") == "inferred-repo"
+
+    assert BeforeRemove.parse_repo_name_from_remote_url_for_test("") == nil
+    assert BeforeRemove.parse_repo_name_from_remote_url_for_test("/") == nil
+    assert BeforeRemove.parse_repo_name_from_remote_url_for_test(123) == nil
+    assert BeforeRemove.normalize_azure_source_ref_for_test(" feature/workpad ") == "refs/heads/feature/workpad"
+    assert BeforeRemove.normalize_azure_source_ref_for_test("refs/heads/feature/workpad") == "refs/heads/feature/workpad"
+    assert BeforeRemove.normalize_identifier_for_test(501) == "501"
+    assert BeforeRemove.normalize_identifier_for_test("  502  ") == "502"
+    assert BeforeRemove.normalize_identifier_for_test("   ") == nil
+    assert BeforeRemove.normalize_identifier_for_test(%{}) == nil
+    assert BeforeRemove.encode_path_segment_for_test("repo name/with slash") == "repo%20name%2Fwith%20slash"
+    assert BeforeRemove.encode_path_segment_for_test(nil) == ""
+    assert BeforeRemove.blank_to_nil_for_test("  value  ") == "value"
+    assert BeforeRemove.blank_to_nil_for_test("   ") == nil
+    assert BeforeRemove.blank_to_nil_for_test(:not_binary) == nil
+  end
+
+  test "helper wrappers expose provider and Azure availability fallbacks" do
+    with_workflow_file([tracker_kind: "linear"], fn ->
+      assert BeforeRemove.default_provider_for_test() == "github"
+    end)
+
+    with_workflow_file(
+      [
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project: "Symphony"
+      ],
+      fn ->
+        assert BeforeRemove.default_provider_for_test() == "azure_devops"
+        assert BeforeRemove.azure_available_for_test("Symphony")
+        refute BeforeRemove.azure_available_for_test("")
+        refute BeforeRemove.azure_available_for_test(nil)
+      end
+    )
+
+    original_workflow_path = Workflow.workflow_file_path()
+    workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)
+
+    try do
+      if is_pid(workflow_store_pid) do
+        assert :ok =
+                 Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+      end
+
+      Application.put_env(:symphony_elixir, :workflow_file_path, 123)
+      assert BeforeRemove.default_provider_for_test() == "github"
+    after
+      Workflow.set_workflow_file_path(original_workflow_path)
+
+      if is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
+        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+      end
+    end
+  end
+
+  test "no-ops when Azure PR listing returns an unexpected payload" do
+    with_workflow_file(
+      [
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony"
+      ],
+      fn ->
+        Application.put_env(
+          :symphony_elixir,
+          :workspace_before_remove_azure_client_module,
+          FakeAzureUnexpectedPayloadClient
+        )
+
+        output =
+          capture_io(fn ->
+            BeforeRemove.run(["--provider", "azure", "--repo", "Symphony", "--branch", "refs/heads/feature/workpad"])
+          end)
+
+        assert output == ""
+        assert_receive {:azure_request_unexpected, :get, "/Symphony/_apis/git/pullrequests", list_opts}
+        assert list_opts.query["searchCriteria.sourceRefName"] == "refs/heads/feature/workpad"
+      end
+    )
+  end
+
+  test "no-ops when Azure PR listing fails or repo inference is unavailable" do
+    with_workflow_file(
+      [
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony"
+      ],
+      fn ->
+        Application.put_env(
+          :symphony_elixir,
+          :workspace_before_remove_azure_client_module,
+          FakeAzureListErrorClient
+        )
+
+        output =
+          capture_io(fn ->
+            BeforeRemove.run(["--provider", "azure_devops", "--repo", "Symphony", "--branch", "feature/list-error"])
+          end)
+
+        assert output == ""
+        assert_receive {:azure_request_error, :get, "/Symphony/_apis/git/pullrequests", _list_opts}
+
+        with_fake_gh_and_git(
+          """
+          #!/bin/sh
+          exit 99
+          """,
+          """
+          #!/bin/sh
+          if [ "$1" = "config" ] && [ "$2" = "--get" ] && [ "$3" = "remote.origin.url" ]; then
+            printf '\n'
+            exit 0
+          fi
+
+          exit 17
+          """,
+          fn _log_path ->
+            output =
+              capture_io(fn ->
+                Mix.Task.reenable("workspace.before_remove")
+                BeforeRemove.run(["--provider", "azure_devops", "--branch", "feature/no-repo"])
+              end)
+
+            assert output == ""
+          end
+        )
+
+        with_fake_gh_and_git(
+          """
+          #!/bin/sh
+          exit 99
+          """,
+          """
+          #!/bin/sh
+          exit 17
+          """,
+          fn _log_path ->
+            output =
+              capture_io(fn ->
+                Mix.Task.reenable("workspace.before_remove")
+                BeforeRemove.run(["--provider", "azure_devops", "--branch", "feature/repo-error"])
+              end)
+
+            assert output == ""
+          end
+        )
       end
     )
   end

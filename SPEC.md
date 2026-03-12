@@ -6,9 +6,9 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+Symphony is a long-running automation service that continuously reads work from a supported issue
+tracker (for example Linear or Azure DevOps), creates an isolated workspace for each issue, and
+runs a coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -119,15 +119,15 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
-   - API calls and normalization for tracker data.
+5. `Integration Layer` (tracker adapter)
+   - Provider-specific API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + optional status surface)
    - Operator visibility into orchestrator and agent behavior.
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API for at least one supported provider (currently `linear` and `azure_devops`).
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports JSON-RPC-like app-server mode over stdio.
@@ -342,19 +342,43 @@ Fields:
 
 - `kind` (string)
   - Required for dispatch.
-  - Current supported value: `linear`
+  - Current supported values: `linear`, `azure_devops`
 - `endpoint` (string)
   - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
+  - Required for `tracker.kind == "azure_devops"` and should point at the Azure DevOps organization
+    base URL (example: `https://dev.azure.com/your-org`)
 - `api_key` (string)
   - May be a literal token or `$VAR_NAME`.
   - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
+  - Canonical environment variable for `tracker.kind == "azure_devops"`: `AZURE_DEVOPS_TOKEN`.
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - Required for dispatch when `tracker.kind == "linear"`.
+- `project` (string)
+  - Required for dispatch when `tracker.kind == "azure_devops"`.
+- `assignee` (string)
+  - Optional for `tracker.kind == "linear"` or `tracker.kind == "azure_devops"`.
+  - May be a literal value or `$VAR_NAME`.
+  - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_ASSIGNEE`.
+  - Canonical environment variable for `tracker.kind == "azure_devops"`: `AZURE_DEVOPS_ASSIGNEE`.
 - `active_states` (list of strings or comma-separated string)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings or comma-separated string)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+- `wiql` (string)
+  - Optional Azure DevOps candidate-query override.
+  - Applies only when `tracker.kind == "azure_devops"`.
+  - Overrides the generated candidate WIQL used by the poller, but does not replace the
+    provider-generated state refresh query paths.
+- `work_item_types` (list of strings or comma-separated string)
+  - Optional Azure DevOps filter for `[System.WorkItemType]`.
+- `area_paths` (list of strings or comma-separated string)
+  - Optional Azure DevOps `UNDER` filter for `[System.AreaPath]`.
+- `iteration_path` (string)
+  - Optional Azure DevOps equality filter for `[System.IterationPath]`.
+- `api_version` (string)
+  - Optional Azure DevOps REST API version override.
+  - Current Elixir default: `7.1`.
 
 #### 5.3.2 `polling` (object)
 
@@ -544,19 +568,29 @@ Validation checks:
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when required by the selected tracker kind.
+- The provider-specific project reference is present when required by the selected tracker kind.
 - `codex.command` is present and non-empty.
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
-- `tracker.kind`: string, required, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
+- `tracker.kind`: string, required, currently `linear | azure_devops`
+- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`,
+  required organization URL when `tracker.kind=azure_devops`
+- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` for Linear and
+  `AZURE_DEVOPS_TOKEN` for Azure DevOps
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
+- `tracker.project`: string, required when `tracker.kind=azure_devops`
+- `tracker.assignee`: string or `$VAR`, optional; canonical env `LINEAR_ASSIGNEE` or
+  `AZURE_DEVOPS_ASSIGNEE`
 - `tracker.active_states`: list/string, default `Todo, In Progress`
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
+- `tracker.wiql`: string, optional Azure DevOps candidate query override
+- `tracker.work_item_types`: list/string, optional Azure DevOps filter
+- `tracker.area_paths`: list/string, optional Azure DevOps filter
+- `tracker.iteration_path`: string, optional Azure DevOps filter
+- `tracker.api_version`: string, optional Azure DevOps REST API version override, default `7.1`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
@@ -1052,7 +1086,7 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation may expose a limited set of client-side tools to the app-server session.
-- Current optional standardized tool: `linear_graphql`.
+- Current optional standardized tools: `linear_graphql`, `azure_devops_request`.
 - If implemented, supported tools should be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names should still return a failure result and continue the session.
@@ -1089,6 +1123,44 @@ Optional client-side tool extension:
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
+
+`azure_devops_request` extension contract:
+
+- Purpose: execute a raw Azure DevOps REST request against the configured Azure Boards / Azure Repos
+  endpoint for the current session.
+- Availability: only meaningful when `tracker.kind == "azure_devops"` and valid Azure auth is
+  configured.
+- Preferred input shape:
+
+  ```json
+  {
+    "method": "GET | POST | PUT | PATCH | DELETE",
+    "path": "/relative/path/on/the/configured/endpoint",
+    "query": {
+      "optional": "query params object"
+    },
+    "body": {
+      "optional": "JSON body"
+    }
+  }
+  ```
+
+- `method` must be a non-empty string from the supported HTTP verb set above.
+- `path` must be either:
+  - a relative path starting with `/`, or
+  - an absolute URL that stays on the configured Azure DevOps endpoint.
+- `path` must not embed query string or fragment data.
+- `query` is optional and, when present, must be a JSON object.
+- `body` is optional and, when present, must be valid JSON.
+- Implementations may inject a default Azure `api-version` query parameter when the caller omits it.
+- Execute one Azure REST request per tool call.
+- Tool result semantics:
+  - 2xx response -> `success=true`
+  - non-2xx response -> `success=false` with status/error payload preserved for debugging
+  - invalid input, cross-host request, missing auth, or transport failure -> `success=false` with a
+    structured error payload
+- Return the parsed response body or structured error payload as tool output that the model can
+  inspect in-session.
 
 Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
 
@@ -1140,7 +1212,7 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract
 
 ### 11.1 Required Operations
 
@@ -1155,11 +1227,23 @@ An implementation must support these tracker adapter operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
-### 11.2 Query Semantics (Linear)
+### 11.2 Cross-Provider Invariants
+
+Every supported tracker implementation must preserve these invariants:
+
+- `fetch_candidate_issues/0` returns issues in configured active states for the configured project
+  scope.
+- `fetch_issues_by_states/1` supports startup terminal cleanup for the selected provider.
+- `fetch_issue_states_by_ids/1` supports active-run reconciliation for the selected provider.
+- The normalized issue output matches the domain model in Section 4, regardless of transport or
+  provider-specific source fields.
+- Missing required credentials or required provider project reference should fail validation before
+  dispatch.
+
+### 11.3 Provider Requirements: Linear
 
 Linear-specific requirements for `tracker.kind == "linear"`:
 
-- `tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
 - `tracker.project_slug` maps to Linear project `slugId`
@@ -1174,32 +1258,61 @@ Important:
 - Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types required by this specification.
 
-A non-Linear implementation may change transport details, but the normalized outputs must match the
-domain model in Section 4.
+### 11.4 Provider Requirements: Azure DevOps
 
-### 11.3 Normalization Rules
+Azure-specific requirements for `tracker.kind == "azure_devops"`:
+
+- REST endpoint rooted at `tracker.endpoint` and scoped to `tracker.project`
+- Auth token sent using the provider's documented PAT/Bearer-compatible transport
+- Candidate issue polling uses either:
+  - generated WIQL from `tracker.project`, `tracker.active_states`, and optional filters, or
+  - `tracker.wiql` when explicitly configured
+- Generated WIQL may narrow results with:
+  - `tracker.assignee`
+  - `tracker.work_item_types`
+  - `tracker.area_paths`
+  - `tracker.iteration_path`
+- Work-item hydration uses batch fetch by Azure work item id and should include fields needed for
+  normalization plus relation expansion for blocker discovery.
+- State refresh by id may reuse the same batch hydration path used for candidates.
+- Current Elixir defaults:
+  - REST `api-version`: `7.1`
+  - Azure Boards comments API version: `7.1-preview.4`
+
+### 11.5 Normalization Rules
 
 Candidate issue normalization should produce fields listed in Section 4.1.1.
 
 Additional normalization details:
 
 - `labels` -> lowercase strings
-- `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- `blocked_by` -> derived from provider-specific blocker relations and normalized to the stable
+  blocker ref shape
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
+- Current provider examples:
+  - Linear: derive `blocked_by` from inverse relations where relation type is `blocks`
+  - Azure DevOps: derive `blocked_by` from work item relation links and normalize identifiers such
+    as `AB#123`
 
-### 11.4 Error Handling Contract
+### 11.6 Error Handling Contract
 
 Recommended error categories:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
-- `missing_tracker_project_slug`
+- `missing_tracker_project_reference`
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
 - `linear_unknown_payload`
 - `linear_missing_end_cursor` (pagination integrity error)
+- `missing_azure_devops_endpoint`
+- `missing_azure_devops_project`
+- `missing_azure_devops_api_token`
+- `azure_devops_api_request` (transport failures)
+- `azure_devops_api_status` (non-2xx HTTP)
+- `azure_devops_unknown_payload`
 
 Orchestrator behavior on tracker errors:
 
@@ -1207,7 +1320,7 @@ Orchestrator behavior on tracker errors:
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.5 Tracker Writes (Important Boundary)
+### 11.7 Tracker Writes (Important Boundary)
 
 Symphony does not require first-class tracker write APIs in the orchestrator.
 
@@ -1216,8 +1329,8 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
-- If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
-  the agent toolchain rather than orchestrator business logic.
+- If optional provider tools such as `linear_graphql` or `azure_devops_request` are implemented,
+  they are still part of the agent toolchain rather than orchestrator business logic.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1527,7 +1640,7 @@ API design notes:
 1. `Workflow/Config Failures`
    - Missing `WORKFLOW.md`
    - Invalid YAML front matter
-   - Unsupported tracker kind or missing tracker credentials/project slug
+   - Unsupported tracker kind or missing tracker credentials / provider project reference
    - Missing coding-agent executable
 
 2. `Workspace Failures`
@@ -1665,10 +1778,11 @@ Possible hardening measures include:
   of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
-  dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
-- Narrowing the optional `linear_graphql` tool so it can only read or mutate data inside the
-  intended project scope, rather than exposing general workspace-wide tracker access.
+- Filtering which tracker issues, projects, teams, labels, or other provider-specific sources are
+  eligible for dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
+- Narrowing optional provider tools such as `linear_graphql` or `azure_devops_request` so they only
+  operate inside the intended project scope, rather than exposing general workspace-wide tracker
+  access.
 - Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
   available to the agent to the minimum needed for the workflow.
 
@@ -1942,7 +2056,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when optional values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
+- `tracker.kind` validation enforces currently supported kinds (`linear`, `azure_devops`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
@@ -1969,15 +2083,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
+- Candidate issue fetch uses active states and the provider-specific project reference
 - Linear query uses the specified project filter field (`slugId`)
+- Azure DevOps candidate polling uses generated WIQL or `tracker.wiql` override as specified in
+  Section 11.4
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
-- Blockers are normalized from inverse relations of type `blocks`
+- Blockers are normalized to the stable `blocked_by` shape across providers
 - Labels are normalized to lowercase
 - Issue state refresh by ID returns minimal normalized issues
-- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
-- Error mapping for request errors, non-200, GraphQL errors, malformed payloads
+- Linear issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.3
+- Azure DevOps work item identifiers normalize to stable issue identifiers such as `AB#123`
+- Error mapping for request errors, non-200, GraphQL errors, malformed payloads, and Azure REST
+  failures
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -2026,6 +2144,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
+- If the optional `azure_devops_request` client-side tool extension is implemented:
+  - the tool is advertised to the session
+  - valid `method` / `path` / `query` / `body` inputs execute against configured Azure auth
+  - cross-host absolute URLs are rejected before transport
+  - non-2xx Azure responses produce `success=false` while preserving status/error details
+  - invalid arguments, missing auth, and transport failures return structured failure payloads
+  - unsupported tool names still fail without stalling the session
 
 ### 17.6 Observability
 
@@ -2052,8 +2177,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 These checks are recommended for production readiness and may be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
-  documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY`,
+  `AZURE_DEVOPS_TOKEN`, or a documented local bootstrap mechanism for the selected provider.
 - Real integration tests should use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test should be reported as skipped, not silently treated as passed.
@@ -2095,12 +2220,14 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
+- Optional `azure_devops_request` client-side tool extension exposes raw Azure DevOps REST access
+  through the app-server session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- TODO: Add pluggable issue tracker adapters beyond the current `linear` and `azure_devops` set.
 
 ### 18.3 Operational Validation Before Production (Recommended)
 

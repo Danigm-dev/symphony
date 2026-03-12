@@ -43,6 +43,7 @@ defmodule SymphonyElixir.AzureDevOps.Client do
   @spec raw_request(atom(), String.t(), request_opts()) :: {:ok, term()} | {:error, term()}
   def raw_request(method, path, request_opts \\ %{})
 
+  @spec raw_request(atom(), String.t(), request_opts()) :: {:ok, term()} | {:error, term()}
   def raw_request(method, path, request_opts)
       when is_atom(method) and is_binary(path) and is_map(request_opts) do
     with :ok <- require_api_token() do

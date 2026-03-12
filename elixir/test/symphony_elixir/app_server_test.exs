@@ -923,6 +923,160 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server advertises and executes azure_devops_request for azure workflows" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-azure-tool-call-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "AB-90C")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-azure-tool-call.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-azure-tool-call.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' \"$line\" >> \"$trace_file\"
+
+        case \"$count\" in
+          1)
+            printf '%s\\n' '{\"id\":1,\"result\":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90c\"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90c\"}}}'
+            printf '%s\\n' '{\"id\":104,\"method\":\"item/tool/call\",\"params\":{\"name\":\"azure_devops_request\",\"callId\":\"call-90c\",\"threadId\":\"thread-90c\",\"turnId\":\"turn-90c\",\"arguments\":{\"method\":\"GET\",\"path\":\"/Symphony/_apis/git/repositories\",\"query\":{\"api-version\":\"7.1\"}}}}'
+            ;;
+          5)
+            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-azure-tool-call",
+        identifier: "AB-90C",
+        title: "Azure tool call",
+        description: "Ensure Azure dynamic tools round-trip through app-server",
+        state: "Active",
+        url: "https://dev.azure.com/openai/Symphony/_workitems/edit/90",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+
+      tool_executor = fn tool, arguments ->
+        send(test_pid, {:tool_called, tool, arguments})
+
+        %{
+          "success" => true,
+          "contentItems" => [
+            %{
+              "type" => "inputText",
+              "text" => ~s({"value":[{"id":"repo-123","name":"symphony"}]})
+            }
+          ]
+        }
+      end
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Handle Azure tool calls", issue, tool_executor: tool_executor)
+
+      assert_received {:tool_called, "azure_devops_request",
+                       %{
+                         "method" => "GET",
+                         "path" => "/Symphony/_apis/git/repositories",
+                         "query" => %{"api-version" => "7.1"}
+                       }}
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 2 and
+                   case get_in(payload, ["params", "dynamicTools"]) do
+                     [
+                       %{
+                         "description" => description,
+                         "inputSchema" => %{"required" => ["method", "path"]},
+                         "name" => "azure_devops_request"
+                       }
+                     ] ->
+                       description =~ "Azure DevOps"
+
+                     _ ->
+                       false
+                   end
+               else
+                 false
+               end
+             end)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 104 and
+                   get_in(payload, ["result", "success"]) == true and
+                   get_in(payload, ["result", "contentItems", Access.at(0), "text"]) ==
+                     ~s({"value":[{"id":"repo-123","name":"symphony"}]})
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server buffers partial JSON lines until newline terminator" do
     test_root =
       Path.join(

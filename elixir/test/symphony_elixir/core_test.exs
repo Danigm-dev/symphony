@@ -7,6 +7,27 @@ defmodule SymphonyElixir.CoreTest do
     def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
   end
 
+  defmodule FakeAzureDevOpsStartupCleanupClient do
+    def fetch_candidate_issues, do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+
+    def fetch_issues_by_states(states) do
+      if recipient = Application.get_env(:symphony_elixir, :azure_startup_cleanup_recipient) do
+        send(recipient, {:azure_startup_cleanup_states, states})
+      end
+
+      {:ok,
+       [
+         %SymphonyElixir.Issue{
+           id: "azure-terminal-1",
+           identifier: "AB#801",
+           title: "Terminal Azure issue",
+           state: "Completed"
+         }
+       ]}
+    end
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -498,6 +519,79 @@ defmodule SymphonyElixir.CoreTest do
     assert updated_entry.issue.state == "In Progress"
   end
 
+  test "reconcile honors custom azure active and terminal states from workflow config" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-azure-state-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "azure-issue-1"
+    issue_identifier = "AB#557"
+    workspace = Path.join(test_root, "AB_557")
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony",
+        tracker_active_states: ["Committed"],
+        tracker_terminal_states: ["Completed"],
+        workspace_root: test_root
+      )
+
+      File.mkdir_p!(workspace)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: %Issue{id: issue_id, state: "New", identifier: issue_identifier},
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      active_issue = %SymphonyElixir.Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Committed",
+        title: "Azure active refresh",
+        description: "Custom Azure active states should keep the worker running",
+        labels: []
+      }
+
+      active_state = Orchestrator.reconcile_issue_states_for_test([active_issue], state)
+
+      assert active_state.running[issue_id].issue.state == "Committed"
+      assert File.exists?(workspace)
+
+      terminal_issue = %{active_issue | state: "Completed"}
+      terminal_state = Orchestrator.reconcile_issue_states_for_test([terminal_issue], active_state)
+
+      refute Map.has_key?(terminal_state.running, issue_id)
+      refute MapSet.member?(terminal_state.claimed, issue_id)
+      refute Process.alive?(agent_pid)
+      refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "reconcile stops running issue when it is reassigned away from this worker" do
     issue_id = "issue-reassigned"
 
@@ -574,6 +668,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    reference_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -582,7 +677,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, reference_ms, 500, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -615,6 +710,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    reference_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -622,7 +718,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, reference_ms, 39_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -654,6 +750,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    reference_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -661,11 +758,65 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, reference_ms, 9_000, 10_500)
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  test "orchestrator startup cleanup uses azure terminal states to remove stale workspaces" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-azure-startup-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(test_root, "AB_801")
+    orchestrator_name = Module.concat(__MODULE__, :AzureStartupCleanupOrchestrator)
+
+    try do
+      File.mkdir_p!(workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "azure_devops",
+        tracker_endpoint: "https://dev.azure.com/openai",
+        tracker_api_token: "azure-token",
+        tracker_project_slug: nil,
+        tracker_project: "Symphony",
+        tracker_active_states: ["New", "Committed"],
+        tracker_terminal_states: ["Completed"],
+        workspace_root: test_root
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :azure_devops_client_module,
+        FakeAzureDevOpsStartupCleanupClient
+      )
+
+      Application.put_env(:symphony_elixir, :azure_startup_cleanup_recipient, self())
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :azure_devops_client_module)
+        Application.delete_env(:symphony_elixir, :azure_startup_cleanup_recipient)
+      end)
+
+      capture_log(fn ->
+        {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+        try do
+          assert_receive {:azure_startup_cleanup_states, ["Completed"]}
+          refute File.exists?(workspace)
+        after
+          if Process.alive?(pid) do
+            Process.exit(pid, :normal)
+          end
+        end
+      end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp assert_due_in_range(due_at_ms, reference_ms, min_remaining_ms, max_remaining_ms) do
+    remaining_ms = due_at_ms - reference_ms
 
     assert remaining_ms >= min_remaining_ms
     assert remaining_ms <= max_remaining_ms

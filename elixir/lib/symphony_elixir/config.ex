@@ -491,16 +491,14 @@ defmodule SymphonyElixir.Config do
   defp require_tracker_configuration do
     case tracker_kind() do
       "linear" ->
-        with :ok <- require_tracker_api_token("linear"),
-             :ok <- require_tracker_project_reference("linear") do
-          :ok
+        with :ok <- require_tracker_api_token("linear") do
+          require_tracker_project_reference("linear")
         end
 
       "azure_devops" ->
         with :ok <- require_tracker_endpoint("azure_devops"),
-             :ok <- require_tracker_api_token("azure_devops"),
-             :ok <- require_tracker_project_reference("azure_devops") do
-          :ok
+             :ok <- require_tracker_api_token("azure_devops") do
+          require_tracker_project_reference("azure_devops")
         end
 
       _ ->

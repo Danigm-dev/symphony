@@ -48,6 +48,38 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
     end
   end
 
+  @doc false
+  @spec normalize_provider_for_test(String.t() | nil) :: String.t() | nil
+  def normalize_provider_for_test(provider), do: normalize_provider(provider)
+
+  @doc false
+  @spec default_provider_for_test() :: String.t()
+  def default_provider_for_test, do: default_provider()
+
+  @doc false
+  @spec azure_available_for_test(term()) :: boolean()
+  def azure_available_for_test(repo), do: azure_available?(repo)
+
+  @doc false
+  @spec parse_repo_name_from_remote_url_for_test(term()) :: String.t() | nil
+  def parse_repo_name_from_remote_url_for_test(remote_url), do: parse_repo_name_from_remote_url(remote_url)
+
+  @doc false
+  @spec normalize_azure_source_ref_for_test(String.t()) :: String.t()
+  def normalize_azure_source_ref_for_test(branch), do: normalize_azure_source_ref(branch)
+
+  @doc false
+  @spec normalize_identifier_for_test(term()) :: String.t() | nil
+  def normalize_identifier_for_test(value), do: normalize_identifier(value)
+
+  @doc false
+  @spec encode_path_segment_for_test(term()) :: String.t()
+  def encode_path_segment_for_test(value), do: encode_path_segment(value)
+
+  @doc false
+  @spec blank_to_nil_for_test(term()) :: String.t() | nil
+  def blank_to_nil_for_test(value), do: blank_to_nil(value)
+
   defp maybe_close_open_pull_requests(_provider, _repo, nil), do: :ok
 
   defp maybe_close_open_pull_requests(@azure_provider, repo, branch) do
@@ -250,7 +282,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
   defp parse_repo_name_from_remote_url(remote_url) when is_binary(remote_url) do
     remote_url
     |> String.trim_trailing("/")
-    |> String.split("/")
+    |> String.split("/", trim: true)
     |> List.last()
     |> case do
       nil -> nil

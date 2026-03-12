@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Issue, as: NeutralIssue
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Linear.Issue, as: LinearIssue
+  alias SymphonyElixir.Tracker.Memory
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -270,6 +271,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue |> LinearIssue.to_issue() |> NeutralIssue.label_names() == ["frontend", "infra"]
     assert issue.labels == ["frontend", "infra"]
     refute issue.assigned_to_worker
+
+    neutral_from_strings =
+      NeutralIssue.from(%{
+        "id" => "xyz",
+        "labels" => ["backend"],
+        "assigned_to_worker" => false,
+        "branch_name" => "feature/xyz"
+      })
+
+    assert neutral_from_strings.id == "xyz"
+    assert neutral_from_strings.labels == ["backend"]
+    assert neutral_from_strings.branch_name == "feature/xyz"
+    refute neutral_from_strings.assigned_to_worker
+    assert NeutralIssue.label_names(%NeutralIssue{labels: nil}) == []
+    assert NeutralIssue.label_names(%NeutralIssue{}) == []
+    assert NeutralIssue.from(nil) == %NeutralIssue{}
+
+    converted_linear = LinearIssue.from_issue(%{"id" => "linear-1", "labels" => ["ops"]})
+    assert converted_linear.id == "linear-1"
+    assert LinearIssue.label_names(converted_linear) == ["ops"]
+  end
+
+  test "memory tracker keeps neutral issue structs unchanged" do
+    neutral_issue = %NeutralIssue{id: "neutral-1", identifier: "MT-NEUTRAL", state: "Todo"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [neutral_issue])
+
+    assert {:ok, [^neutral_issue]} = Memory.fetch_candidate_issues()
   end
 
   test "linear client normalizes blockers from inverse relations" do

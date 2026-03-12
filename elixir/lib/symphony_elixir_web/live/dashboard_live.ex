@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.{Config, Workflow, WorkflowStore}
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -14,6 +15,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
+      |> assign_azure_repo_settings()
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -35,6 +37,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
      socket
      |> assign(:payload, load_payload())
      |> assign(:now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_event("save_azure_repo_settings", %{"azure_repo_settings" => params}, socket) do
+    case WorkflowStore.persist_azure_repo_settings(params) do
+      {:ok, workflow} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Azure Repos settings saved to WORKFLOW.md.")
+         |> assign_azure_repo_settings(workflow)}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, azure_repo_settings_error(reason))
+         |> assign_azure_repo_settings(nil, params)}
+    end
   end
 
   @impl true
@@ -105,6 +124,64 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
         </section>
+
+        <%= if @azure_repo_settings_visible do %>
+          <section class="section-card">
+            <div class="section-header">
+              <div>
+                <h2 class="section-title">Azure Repos settings</h2>
+                <p class="section-copy">
+                  Persist the Azure repository settings that `push`, `land`, and cleanup need, so they can be changed later without editing code.
+                </p>
+              </div>
+            </div>
+
+            <%= if @azure_repo_settings_missing do %>
+              <p class="empty-state">
+                Save `repository` and `target_branch` in `WORKFLOW.md` before running Azure Repos lifecycle actions.
+              </p>
+            <% end %>
+
+            <%= if @azure_repo_inferred_repository do %>
+              <p class="section-copy">
+                Inferred from `git remote.origin.url`: <span class="mono"><%= @azure_repo_inferred_repository %></span>
+              </p>
+            <% end %>
+
+            <.form for={@azure_repo_settings_form} phx-submit="save_azure_repo_settings">
+              <p>
+                <label for="azure_repo_settings_repository">Repository</label><br />
+                <input
+                  id="azure_repo_settings_repository"
+                  type="text"
+                  name={@azure_repo_settings_form[:repository].name}
+                  value={@azure_repo_settings_form[:repository].value}
+                />
+              </p>
+
+              <p>
+                <label for="azure_repo_settings_target_branch">Target branch</label><br />
+                <input
+                  id="azure_repo_settings_target_branch"
+                  type="text"
+                  name={@azure_repo_settings_form[:target_branch].name}
+                  value={@azure_repo_settings_form[:target_branch].value}
+                />
+              </p>
+
+              <p>
+                <label for="azure_repo_settings_required_reviewers">Required reviewers</label><br />
+                <textarea
+                  id="azure_repo_settings_required_reviewers"
+                  name={@azure_repo_settings_form[:required_reviewers].name}
+                  rows="4"
+                ><%= @azure_repo_settings_form[:required_reviewers].value %></textarea>
+              </p>
+
+              <button type="submit">Save Azure settings</button>
+            </.form>
+          </section>
+        <% end %>
 
         <section class="section-card">
           <div class="section-header">
@@ -327,4 +404,90 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
+
+  defp assign_azure_repo_settings(socket, workflow \\ nil, form_overrides \\ nil) do
+    workflow = workflow || current_workflow()
+    tracker_kind = workflow_tracker_kind(workflow)
+    visible = tracker_kind == "azure_devops"
+    persisted_repository = workflow_tracker_value(workflow, "repository")
+    inferred_repository = Workflow.infer_azure_repo_from_origin()
+
+    form_values =
+      form_overrides ||
+        %{
+          "repository" => persisted_repository || inferred_repository || "",
+          "target_branch" => workflow_tracker_value(workflow, "target_branch") || "",
+          "required_reviewers" => workflow_tracker_reviewers(workflow) |> Enum.join("\n")
+        }
+
+    assign(socket,
+      azure_repo_settings_visible: visible,
+      azure_repo_settings_missing:
+        visible and
+          (is_nil(persisted_repository) or
+             is_nil(workflow_tracker_value(workflow, "target_branch"))),
+      azure_repo_inferred_repository: if(visible, do: inferred_repository, else: nil),
+      azure_repo_settings_form: to_form(form_values, as: :azure_repo_settings)
+    )
+  end
+
+  defp current_workflow do
+    case Workflow.current() do
+      {:ok, workflow} -> workflow
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp workflow_tracker_kind(%{config: config}) when is_map(config) do
+    case get_in(config, ["tracker", "kind"]) do
+      kind when is_binary(kind) -> kind
+      _ -> Config.tracker_kind()
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp workflow_tracker_kind(_workflow), do: nil
+
+  defp workflow_tracker_value(%{config: config}, key) when is_map(config) and is_binary(key) do
+    case get_in(config, ["tracker", key]) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp workflow_tracker_value(_workflow, _key), do: nil
+
+  defp workflow_tracker_reviewers(%{config: config}) when is_map(config) do
+    case get_in(config, ["tracker", "required_reviewers"]) do
+      reviewers when is_list(reviewers) ->
+        reviewers
+        |> Enum.map(&to_string/1)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      _ ->
+        []
+    end
+  end
+
+  defp workflow_tracker_reviewers(_workflow), do: []
+
+  defp azure_repo_settings_error(:missing_azure_devops_repository),
+    do: "Azure repository is required before Azure Repos lifecycle actions can run."
+
+  defp azure_repo_settings_error(:missing_azure_devops_target_branch),
+    do: "Azure target branch is required before Azure Repos lifecycle actions can run."
+
+  defp azure_repo_settings_error(:azure_repo_settings_require_azure_devops_tracker),
+    do: "Azure Repos settings can only be edited when `tracker.kind` is `azure_devops`."
+
+  defp azure_repo_settings_error(reason),
+    do: "Failed to persist Azure Repos settings: #{inspect(reason)}"
 end

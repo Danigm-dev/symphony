@@ -46,6 +46,25 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  @spec persist_azure_repo_settings(map()) :: {:ok, Workflow.loaded_workflow()} | {:error, term()}
+  def persist_azure_repo_settings(attrs) when is_map(attrs) do
+    with :ok <- Workflow.persist_azure_repo_settings(attrs) do
+      current()
+    end
+  end
+
+  @spec replace_workflow(Path.t(), Workflow.loaded_workflow(), String.t()) :: :ok | {:error, term()}
+  def replace_workflow(path, workflow, content)
+      when is_binary(path) and is_map(workflow) and is_binary(content) do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        GenServer.call(__MODULE__, {:replace_workflow, path, workflow, content})
+
+      _ ->
+        :ok
+    end
+  end
+
   @impl true
   def init(_opts) do
     case load_state(Workflow.workflow_file_path()) do
@@ -76,6 +95,16 @@ defmodule SymphonyElixir.WorkflowStore do
 
       {:error, reason, new_state} ->
         {:reply, {:error, reason}, new_state}
+    end
+  end
+
+  def handle_call({:replace_workflow, path, workflow, content}, _from, %State{} = state) do
+    case current_stamp(path, content) do
+      {:ok, stamp} ->
+        {:reply, :ok, %State{state | path: path, stamp: stamp, workflow: workflow}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -144,6 +173,16 @@ defmodule SymphonyElixir.WorkflowStore do
       {:ok, {stat.mtime, stat.size, :erlang.phash2(content)}}
     else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp current_stamp(path, content) when is_binary(path) and is_binary(content) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} ->
+        {:ok, {stat.mtime, stat.size, :erlang.phash2(content)}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -689,6 +689,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.linear_endpoint() == "https://api.linear.app/graphql"
     assert Config.linear_api_token() == nil
     assert Config.linear_project_slug() == nil
+    assert Config.azure_devops_repository() == nil
+    assert Config.azure_devops_target_branch() == nil
+    assert Config.azure_devops_required_reviewers() == []
     assert Config.workspace_root() == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert Config.max_concurrent_agents() == 10
     assert Config.codex_command() == "codex app-server"

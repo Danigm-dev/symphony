@@ -105,6 +105,9 @@ defmodule SymphonyElixir.TestSupport do
           tracker_area_paths: nil,
           tracker_iteration_path: nil,
           tracker_api_version: nil,
+          tracker_repository: nil,
+          tracker_target_branch: nil,
+          tracker_required_reviewers: nil,
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           max_concurrent_agents: 10,
@@ -146,6 +149,9 @@ defmodule SymphonyElixir.TestSupport do
     tracker_area_paths = Keyword.get(config, :tracker_area_paths)
     tracker_iteration_path = Keyword.get(config, :tracker_iteration_path)
     tracker_api_version = Keyword.get(config, :tracker_api_version)
+    tracker_repository = Keyword.get(config, :tracker_repository)
+    tracker_target_branch = Keyword.get(config, :tracker_target_branch)
+    tracker_required_reviewers = Keyword.get(config, :tracker_required_reviewers)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -188,6 +194,9 @@ defmodule SymphonyElixir.TestSupport do
         "  area_paths: #{yaml_value(tracker_area_paths)}",
         "  iteration_path: #{yaml_value(tracker_iteration_path)}",
         "  api_version: #{yaml_value(tracker_api_version)}",
+        "  repository: #{yaml_value(tracker_repository)}",
+        "  target_branch: #{yaml_value(tracker_target_branch)}",
+        "  required_reviewers: #{yaml_value(tracker_required_reviewers)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",

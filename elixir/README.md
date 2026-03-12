@@ -13,15 +13,17 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
-1. Polls Linear for candidate work
+1. Polls the configured tracker for candidate work
 2. Creates an isolated workspace per issue
 3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During app-server sessions, Symphony can also serve a provider-specific client-side tool:
+
+- `linear_graphql` when `tracker.kind: linear`
+- `azure_devops_request` when `tracker.kind: azure_devops`
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -30,18 +32,18 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+2. Choose the tracker example that matches your deployment:
+   - Linear: start from [`WORKFLOW.md`](./WORKFLOW.md).
+   - Azure DevOps: start from [`WORKFLOW.azure_devops.md`](./WORKFLOW.azure_devops.md).
+3. Export the tracker credential for your provider:
+   - Linear: `LINEAR_API_KEY`
+   - Azure DevOps: `AZURE_DEVOPS_TOKEN`
+4. Optionally copy the repo skills your workflow expects.
+   - Linear workflows typically use `commit`, `push`, `pull`, `land`, and `linear`.
+   - Azure workflows typically use `commit`, `push`, `pull`, `land`, and `azure_devops`.
+5. Customize the copied workflow file for your project.
+   - Linear uses `tracker.project_slug`.
+   - Azure DevOps uses `tracker.project` and usually also documents the Azure repo id/name and target branch in the workflow body or repo docs.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -126,7 +128,12 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.api_key` reads from the provider fallback env var when unset or when value is `$...`.
+  - Linear fallback: `LINEAR_API_KEY`
+  - Azure DevOps fallback: `AZURE_DEVOPS_TOKEN`
+- `tracker.assignee` also supports `$...` indirection.
+  - Linear fallback: `LINEAR_ASSIGNEE`
+  - Azure DevOps fallback: `AZURE_DEVOPS_ASSIGNEE`
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -147,6 +154,43 @@ codex:
 - If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Azure DevOps workflow
+
+The Linear example above remains the default example. For Azure Boards + Azure Repos, use
+[`WORKFLOW.azure_devops.md`](./WORKFLOW.azure_devops.md).
+
+Symphony runtime keys consumed by the current Azure adapter:
+
+- `tracker.kind: azure_devops`
+- `tracker.endpoint`: required Azure organization URL such as `https://dev.azure.com/your-org`
+- `tracker.api_key`: PAT literal or `$AZURE_DEVOPS_TOKEN`
+- `tracker.project`: required Azure project name
+- `tracker.assignee`: optional display name, email, or `me`; also supports `$AZURE_DEVOPS_ASSIGNEE`
+- `tracker.active_states`
+- `tracker.terminal_states`
+- `tracker.wiql`: optional override for candidate polling only
+- `tracker.work_item_types`
+- `tracker.area_paths`
+- `tracker.iteration_path`
+- `tracker.api_version`: optional; defaults to `7.1`
+
+Provider-specific operator expectations for the Azure path:
+
+- `azure_devops_request` is the raw REST tool exposed to the app-server session.
+- The provider-aware `push` and `land` skills expect the Azure project, repository id or name,
+  target branch, and real work item id to be known before they mutate Azure Repos.
+- The Azure path keeps one persistent `## Codex Workpad` comment on the work item and updates it in
+  place during planning, validation, push, land, and cleanup.
+- PR linkage priority is:
+  1. direct work-item link using the PR `artifactId`;
+  2. `AB#<work-item-id>` in the PR title/body;
+  3. PR URL stored in the workpad if direct linking is blocked.
+- The recommended Azure cleanup hook is `mix workspace.before_remove --provider azure_devops --repo <repo>`.
+
+The current implementation does not add a dedicated `tracker.repo` or `tracker.target_branch`
+frontmatter key. Keep those values in the workflow prompt, repo-local docs, or repo-local skills so
+the Azure Repos flow has the inputs it needs.
 
 ## Web dashboard
 
